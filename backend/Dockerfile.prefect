@@ -1,0 +1,18 @@
+FROM prefecthq/prefect:3.6.22-python3.12
+
+WORKDIR /app
+
+# Install system dependencies for pyodbc
+RUN apt-get update && apt-get install -y \
+    unixodbc-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pendulum binary wheel first to avoid build issues
+RUN pip install --no-cache-dir pendulum --only-binary :all:
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN pip install -e . --no-deps

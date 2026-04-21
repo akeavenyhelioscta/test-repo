@@ -1,0 +1,48 @@
+# Environment files (secrets)
+.env
+**/.env
+**/.env.*
+.mcp.json
+azure-infra/config.secrets.sh
+.claude/settings.local.json
+
+# Python build/dist directories
+dist/*
+*.egg-info/
+
+# Docusaurus
+node_modules/
+documentation/build/
+documentation/.docusaurus/
+documentation/.cache-loader/
+site/
+
+# Python cache files
+__pycache__/
+**/__pycache__/*
+*.py[cod]
+*$py.class
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# logs
+**/logs/*
+*.log
+
+# misc files
+.archive/*
+.sql-scripts/*
+.TODO/
+TODO/*
+*.pdf
+*.csv
+*.xlsx
+*.xlsm
+*.xlsb
+
+# refactor
+.refactor/
+
+# meteologica
+backend/scrapes/meteologica/examples_from_api_docs/

@@ -1,0 +1,57 @@
+# documentation
+sphinx
+sphinx-autodoc-typehints
+sphinx-rtd-theme
+myst-parser
+
+# db
+psycopg2-binary==2.9.10
+pyodbc
+
+# ipython
+ipython
+jupyter 
+notebook
+
+# python
+poetry==1.8.4
+python-dotenv==1.0.1
+numpy
+pandas>=2.0.0
+pyarrow>=12.0.0
+tabulate
+openpyxl>=3.1.0
+panel
+PyJWT
+
+# gridstatus
+gridstatusio
+gridstatus==0.34.0
+
+# sftp
+paramiko
+
+# orchestration
+tenacity>=8.2
+
+# http
+requests>=2.31
+
+# azure
+azure-storage-blob>=12.19.0
+azure-core>=1.29.0
+fsspec>=2024.1.0
+adlfs>=2024.1.0
+
+# dbt
+dbt-core==1.8.* 
+dbt-postgres==1.8.*
+dbt-sqlserver==1.8.*
+
+# slack
+slack-sdk
+
+# api
+fastapi>=0.115.0
+uvicorn>=0.34.0
+fastapi-mcp>=0.3.0

@@ -1,0 +1,3 @@
+# Keep shell scripts with LF endings on all platforms
+*.sh text eol=lf
+.githooks/* text eol=lf
