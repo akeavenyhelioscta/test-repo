@@ -7,13 +7,12 @@ from dateutil.relativedelta import relativedelta
 from dbt.cli.main import dbtRunner
 from prefect import flow
 
+
+from backend.settings import CACHE_DIR, DBT_PROJECT_DIR
 from backend.schedulers.prefect.power.pjm.pjm_lmps_hourly_notifications import notify_da_lmps
-from backend.utils import logging_utils, pipeline_run_logger
+from backend.utils import logging_utils, pipeline_run_logger, azure_postgresql_utils
 
 logger = logging.getLogger(__name__)
-
-DBT_PROJECT_DIR = str(Path(__file__).resolve().parents[4] / "dbt" / "dbt_azure_postgresql")
-
 
 def run_dbt(select: str) -> None:
     """Run dbt models by selection syntax (e.g. '+pjm_lmps_hourly')."""
@@ -56,6 +55,14 @@ def pjm_lmps_hourly():
         # ────── 3. Run dbt transformations (upstream only — no downstream pjm_modelling) ──────
         run_dbt("+pjm_lmps_hourly")
 
+        # ────── 4. Pull full history from Postgres ──────
+        df = azure_postgresql_utils.pull_from_db("SELECT * FROM pjm_cleaned_v3_2026_04_22.pjm_lmps_hourly")
+
+        # ────── 5. Export to parquet ──────
+        cache_file = CACHE_DIR / "pjm_lmps_hourly.parquet"
+        df.to_parquet(cache_file, index=False)
+        logger.info(f"Wrote {len(df):,} rows → {cache_file}")
+
         run.success()
     except Exception as e:
         run.failure(error=e)
@@ -77,6 +84,14 @@ def pjm_lmps_hourly_backfill():
         # ────── 2. Run dbt transformations (upstream only) ──────
         run_dbt("+pjm_lmps_hourly")
 
+        # ────── 3. Pull full history from Postgres ──────
+        df = azure_postgresql_utils.pull_from_db("SELECT * FROM pjm_cleaned_v3_2026_04_22.pjm_lmps_hourly")
+
+        # ────── 3. Export to parquet ──────
+        cache_file = CACHE_DIR / "pjm_lmps_hourly.parquet"
+        df.to_parquet(cache_file, index=False)
+        logger.info(f"Wrote {len(df):,} rows → {cache_file}")
+
         run.success()
     except Exception as e:
         run.failure(error=e)
@@ -84,4 +99,5 @@ def pjm_lmps_hourly_backfill():
 
 
 if __name__ == "__main__":
-    pjm_lmps_hourly_backfill()
+    pjm_lmps_hourly()
+    # pjm_lmps_hourly_backfill()

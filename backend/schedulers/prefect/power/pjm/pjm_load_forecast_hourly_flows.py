@@ -5,12 +5,11 @@ from pathlib import Path
 from dbt.cli.main import dbtRunner
 from prefect import flow
 
-from backend.utils import logging_utils, pipeline_run_logger
+from backend.settings import CACHE_DIR, DBT_PROJECT_DIR
+from backend.utils import logging_utils, pipeline_run_logger, azure_postgresql_utils
+
 
 logger = logging.getLogger(__name__)
-
-DBT_PROJECT_DIR = str(Path(__file__).resolve().parents[4] / "dbt" / "dbt_azure_postgresql")
-
 
 def run_dbt(select: str) -> None:
     """Run dbt models by selection syntax (e.g. '+pjm_load_forecast_hourly')."""
@@ -47,7 +46,15 @@ def pjm_load_forecast_hourly():
         mod.main()
 
         # ────── 2. Run dbt transformations (upstream only — no downstream pjm_modelling) ──────
-        run_dbt("+pjm_load_forecast_hourly")
+        run_dbt("+pjm_modelling_load_forecast_hourly_da_cutoff")
+
+        # ────── 3. Pull full history from Postgres ──────
+        df = azure_postgresql_utils.pull_from_db("SELECT * FROM pjm_v3_2026_04_22.pjm_modelling_load_forecast_hourly_da_cutoff")
+
+        # ────── 4. Export to parquet ──────
+        cache_file = CACHE_DIR / "pjm_load_forecast_hourly.parquet"
+        df.to_parquet(cache_file, index=False)
+        logger.info(f"Wrote {len(df):,} rows → {cache_file}")
 
         run.success()
     except Exception as e:

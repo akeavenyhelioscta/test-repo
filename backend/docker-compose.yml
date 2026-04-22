@@ -1,4 +1,4 @@
-name: helioscta-pjm-da-data-scrapes
+name: helioscta-pjm-da-dev
 
 services:
   prefect-postgres:
@@ -46,8 +46,7 @@ services:
     environment:
       - PREFECT_API_URL=http://prefect-server:4200/api
     env_file:
-      - .env.shared
-      - .env.${BACKEND_ENV:-prod}
+      - .env
     command:
       - bash
       - -c
