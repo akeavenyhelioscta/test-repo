@@ -1,0 +1,32 @@
+name: helioscta-power-pjm
+
+prefect-version: 3.0.0
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+
+  # ────── PJM Outages Daily ──────
+  # Daily umbrella: scrape PJM 7-day outage forecast,
+  # rebuild dbt outage marts (actual + forecast — daily),
+  # then export each mart to parquet for downstream consumers.
+  #
+  # Upstream cadence: PJM posts the feed daily at 06:00 EPT (04:00 MST).
+  # We run at 05:00 MST to give the publisher a one-hour buffer.
+
+  - name: Power - PJM Outages Daily
+    entrypoint: schedulers/prefect/power/pjm/pjm_outages_daily_flows.py:pjm_outages_daily
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    tags: [pjm, power, outages_daily]
+    schedules:
+
+      # ────── Daily at 05:00 MST ──────
+      - cron: "0 5 * * *"
+        timezone: "America/Denver"

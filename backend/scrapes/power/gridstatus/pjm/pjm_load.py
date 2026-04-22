@@ -140,7 +140,7 @@ def _upsert(
 
 def main(
         start_date: datetime = (datetime.now() - relativedelta(days=3)),
-        end_date: datetime = (datetime.now() + relativedelta(days=0)),
+        end_date: datetime = (datetime.now() + relativedelta(days=1)),
     ):
 
     run = pipeline_run_logger.PipelineRunLogger(

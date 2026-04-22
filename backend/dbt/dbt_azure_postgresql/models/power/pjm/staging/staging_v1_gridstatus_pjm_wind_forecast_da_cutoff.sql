@@ -14,7 +14,7 @@ WITH all_forecasts AS (
     SELECT * FROM {{ ref('pjm_gridstatus_wind_forecast_hourly') }}
     WHERE
         forecast_execution_datetime_local::TIME <= '10:00:00'
-        AND forecast_execution_datetime_local::DATE = (CURRENT_TIMESTAMP AT TIME ZONE 'US/Eastern')::DATE
+        AND forecast_execution_datetime_local::DATE = (CURRENT_TIMESTAMP AT TIME ZONE 'US/Eastern')::DATE - 1
 ),
 
 -- ────── Latest pre-10 AM EPT revision per forecast_date × hour_ending ──────

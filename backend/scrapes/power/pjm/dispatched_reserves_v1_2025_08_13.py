@@ -28,7 +28,7 @@ logger = logging_utils.init_logging(
 """
 
 def _pull(
-        start_date: str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"),
+        start_date: str = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"),
         end_date: str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"),
     ) -> pd.DataFrame:
     """
@@ -82,7 +82,7 @@ def _upsert(
 
 
 def main(
-        start_date: datetime = (datetime.now() - relativedelta(days=30)),
+        start_date: datetime = (datetime.now() - relativedelta(days=5)),
         end_date: datetime = (datetime.now() + relativedelta(days=1)),
     ):
 

@@ -29,7 +29,7 @@ logger = logging_utils.init_logging(
 
 def _pull(
         start_date: str = (datetime.now() - relativedelta(days=5)).strftime("%Y-%m-%d"),
-        end_date: str = (datetime.now() + relativedelta(days=0)).strftime("%Y-%m-%d"),
+        end_date: str = (datetime.now() + relativedelta(days=1)).strftime("%Y-%m-%d"),
     ) -> pd.DataFrame:
     """
         five_min_tie_flows
@@ -84,7 +84,7 @@ def _upsert(
 
 def main(
         start_date: str = (datetime.now() - relativedelta(days=5)).strftime("%Y-%m-%d"),  # Retention Time: 30 days
-        end_date: str = (datetime.now() + relativedelta(days=0)).strftime("%Y-%m-%d"),
+        end_date: str = (datetime.now() + relativedelta(days=1)).strftime("%Y-%m-%d"),
     ):
 
     run = pipeline_run_logger.PipelineRunLogger(
