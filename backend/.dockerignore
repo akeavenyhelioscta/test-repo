@@ -25,17 +25,18 @@ __pycache__
 *.tmp
 
 # Local runtime/output artifacts that should never be part of image build context
-backend/scrapes/meteologica/examples_from_api_docs/
-backend/scrapes/**/logs/
-backend/scrapes/postions_and_trades/sftp_files/
-backend/.pytest_cache/
-backend/.mypy_cache/
+scrapes/meteologica/examples_from_api_docs/
+scrapes/**/logs/
+scrapes/postions_and_trades/sftp_files/
+.pytest_cache/
+.mypy_cache/
 
 # dbt local artifacts
-backend/dbt/dbt_azure_postgresql/target/*
-!backend/dbt/dbt_azure_postgresql/target/manifest.json
-backend/dbt/dbt_azure_postgresql/dbt_packages
-backend/dbt/dbt_azure_postgresql/logs
-backend/dbt/dbt_azure_sql/target/
-backend/dbt/dbt_azure_sql/dbt_packages/
-backend/dbt/dbt_azure_sql/logs/
+dbt/dbt_azure_postgresql/target/
+dbt/dbt_azure_postgresql/dbt_packages/
+dbt/dbt_azure_postgresql/logs/
+dbt/dbt_azure_sql/target/
+dbt/dbt_azure_sql/dbt_packages/
+dbt/dbt_azure_sql/logs/
+**/target/
+**/dbt_packages/

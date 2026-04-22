@@ -5,6 +5,7 @@
 .mcp.json
 azure-infra/config.secrets.sh
 **/.claude/settings.local.json
+backend/test.py
 
 # Python build/dist directories
 dist/*
@@ -45,4 +46,4 @@ TODO/*
 .refactor/
 
 # meteologica
-backend/scrapes/meteologica/examples_from_api_docs/
+backend/scripts/migrate_db_tables.py

@@ -1,5 +1,5 @@
 {
-    "python.defaultInterpreterPath": "C:/Users/AidanKeaveny/miniconda3/envs/helioscta-backend-dev/python.exe",
+    "python.defaultInterpreterPath": "C:/Users/AidanKeaveny/miniconda3/envs/helioscta-pjm-da-dev/python.exe",
     "python.terminal.activateEnvironment": true,
     "terminal.integrated.defaultProfile.windows": "Git Bash",
 
