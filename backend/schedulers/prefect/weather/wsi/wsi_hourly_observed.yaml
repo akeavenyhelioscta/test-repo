@@ -1,0 +1,31 @@
+name: helioscta-weather-wsi
+
+prefect-version: 3.0.0
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+
+  # ────── WSI Hourly Observed ──────
+  # Daily catch-up of WSI observed weather actuals: pull rolling 7-day window of
+  # hourly observations (revisions land for several days after each hour), then
+  # incrementally rebuild the wsi_hourly_observed_temp mart with a 7-day lookback.
+  #
+  # Schedule: 03:00 America/New_York — late enough that yesterday's full day
+  # of actuals is published, early enough to feed any morning analysis.
+
+  - name: Weather - WSI Hourly Observed
+    entrypoint: schedulers/prefect/weather/wsi/wsi_hourly_observed_flows.py:wsi_hourly_observed
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    tags: [wsi, weather, hourly_observed]
+    schedules:
+
+      - cron: "0 3 * * *"
+        timezone: "America/New_York"

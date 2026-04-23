@@ -1,0 +1,29 @@
+name: helioscta-weather-wsi
+
+prefect-version: 3.0.0
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+
+  # ────── WSI Hourly Forecast ──────
+  # Daily 09:00 ET pull of WSI's then-current hourly temperature forecast revision
+  # for PJM stations; rebuilds the latest-revision mart and exports to parquet.
+  # Safe to re-run — v5 scrape preserves revisions on PK.
+
+  - name: Weather - WSI Hourly Forecast
+    entrypoint: schedulers/prefect/weather/wsi/wsi_hourly_forecast_flows.py:wsi_hourly_forecast
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    tags: [wsi, weather, hourly_forecast]
+    schedules:
+
+      # ────── Daily at 09:00 EPT (auto-handles DST) ──────
+      - cron: "0 9 * * *"
+        timezone: "America/New_York"
