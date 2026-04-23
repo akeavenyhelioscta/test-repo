@@ -1,0 +1,22 @@
+version: 2
+
+sources:
+
+  - name: wsi_v1
+    schema: wsi
+    tables:
+      - name: hourly_forecast_temp_v5_2026_apr_23
+        description: >
+          WSI Trader hourly temperature forecast — PJM cities only, with
+          revision history. PK: (forecast_execution_datetime_utc, local_time,
+          region, site_id, station_name). The execution timestamp is parsed
+          from the WSI CSV header line "Hourly Forecast Made <date> UTC", so
+          re-scraping a revision WSI hasn't reissued is a no-op upsert.
+
+      - name: hourly_observed_temp_v2_20250722
+        description: >
+          WSI Trader hourly observed weather (temp, dewpoint, cloud cover,
+          wind, heat index, wind chill, RH, precip). PK: (date, hour, region,
+          site_id, station_name). Each scrape covers a rolling ~7-day window
+          and upserts. PJM-only as of 2026-04-23; pre-existing rows for other
+          regions are still in the table but no longer refreshed.
