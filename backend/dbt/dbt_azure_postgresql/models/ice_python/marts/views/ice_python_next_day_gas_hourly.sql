@@ -10,8 +10,13 @@
 ---------------------------
 
 SELECT
-    datetime
-    ,date
+    -- Delivery-axis timestamp/date so downstream feature code that
+    -- groups by `date` (or a `datetime` bucket) aggregates per gas_day, not
+    -- per trade_date. `hour_ending` is the source's trade-hour and stays
+    -- passthrough; it is retained for traceability of which snapshot within
+    -- the D-1 HE10 through D HE9 trading window this row came from.
+    (gas_day::TIMESTAMP + (hour_ending || ' hours')::INTERVAL) AS datetime
+    ,gas_day AS date
     ,hour_ending
     ,gas_day
     ,trade_date
@@ -26,4 +31,7 @@ SELECT
     ,transco_leidy_cash
     ,chicago_cg_cash
 FROM {{ ref('staging_v1_ice_next_day_gas_hourly') }}
-ORDER BY datetime DESC
+-- Delivery-day first, then most-recent trade-time within that day. Ordering
+-- by `datetime` alone splits each gas_day into two blocks because HE10-24
+-- come from trade_date = D - 1 and HE1-9 come from trade_date = D.
+ORDER BY gas_day DESC, trade_date DESC, hour_ending DESC
