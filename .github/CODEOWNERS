@@ -1,0 +1,6 @@
+# Aidan owns everything by default — auto-requested as reviewer on all PRs.
+# GitHub skips the PR author, so Aidan's own PRs don't require his own review.
+* @akeavenyhelioscta
+
+# modelling/ is Sunny's primary working area, but Aidan still reviews.
+/modelling/ @akeavenyhelioscta
