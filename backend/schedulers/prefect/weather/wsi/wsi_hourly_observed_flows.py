@@ -58,7 +58,11 @@ def wsi_hourly_observed():
         run_dbt(f"+{MART}")
 
         # ────── 3. Pull mart from Postgres and export to parquet ──────
-        df = azure_postgresql_utils.pull_from_db(f"SELECT * FROM {DBT_SCHEMA}.{MART}")
+        # Filter to 2014+ — the full mart is ~9M rows and OOM'd the worker on a
+        # full-table pull. Modelling consumers only use 2014-onward data.
+        df = azure_postgresql_utils.pull_from_db(
+            f"SELECT * FROM {DBT_SCHEMA}.{MART} WHERE date_ept >= '2014-01-01'"
+        )
         model_cache_utils.write_mart_cache(df, mart=MART, pipeline_name=__name__)
 
         run.success()
