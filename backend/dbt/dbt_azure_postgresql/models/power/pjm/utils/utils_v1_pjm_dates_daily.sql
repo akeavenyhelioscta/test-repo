@@ -107,6 +107,12 @@ DATES AS (
             THEN 1
             ELSE 0
         END AS is_bridge_day
+        ,(
+            SELECT h.holiday_name
+            FROM {{ ref('pjm_holidays') }} h
+            WHERE h.holiday_date::date = date::date
+            LIMIT 1
+        ) AS holiday_name
 
     FROM DAYS
     WHERE TO_CHAR(date, 'MM-DD') != '02-29'

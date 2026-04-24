@@ -113,6 +113,12 @@ DATETIMES AS (
             THEN 1
             ELSE 0
         END AS is_bridge_day
+        ,(
+            SELECT h.holiday_name
+            FROM {{ ref('pjm_holidays') }} h
+            WHERE h.holiday_date::date = datetime::date
+            LIMIT 1
+        ) AS holiday_name
 
     FROM HOURS
     WHERE TO_CHAR(datetime, 'MM-DD') != '02-29'

@@ -1,6 +1,6 @@
 {{
   config(
-    materialized='view'
+    materialized='ephemeral'
   )
 }}
 
@@ -34,5 +34,6 @@ SELECT
     ,is_federal_holiday
     ,is_soft_holiday
     ,is_bridge_day
+    ,holiday_name
 FROM UTILS
 ORDER BY datetime_ending_local DESC

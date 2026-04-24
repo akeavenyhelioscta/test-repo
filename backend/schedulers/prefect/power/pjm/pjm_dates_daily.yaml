@@ -1,0 +1,28 @@
+name: helioscta-power-pjm
+
+prefect-version: 3.0.0
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+
+  # ────── PJM Dates Daily ──────
+  # Rebuild the PJM daily calendar view and publish parquet to Azure Blob
+  # so downstream modelling has a refreshed dates reference each morning.
+
+  - name: PJM Dates Daily
+    entrypoint: schedulers/prefect/power/pjm/pjm_dates_daily_flows.py:pjm_dates_daily
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    tags: [pjm, power, dates_daily]
+    schedules:
+
+      # ────── Daily at 04:00 MST, ahead of downstream consumers ──────
+      - cron: "0 4 * * *"
+        timezone: "America/Denver"
