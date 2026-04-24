@@ -1,40 +1,31 @@
 """Download modelling cache parquet files from Azure Blob.
 
 Reads non-secret config from modelling/settings.py and the connection string
-from modelling/secrets.py. Uses ``importlib`` rather than putting modelling/
-on ``sys.path`` — that would shadow the stdlib ``secrets`` module for any code
-running in the same process.
+from modelling/credentials.py.
 
 Usage:
-    python modelling/data/download.py                    # today (ET)
-    python modelling/data/download.py --date 2026-04-24
-    python modelling/data/download.py --date 2026-04-24 --force
+    python modelling/data/download_from_azure_blob.py                    # today (ET)
+    python modelling/data/download_from_azure_blob.py --date 2026-04-24
+    python modelling/data/download_from_azure_blob.py --date 2026-04-24 --force
 """
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
-from types import ModuleType
+
+# Ensure modelling/ is importable regardless of CWD.
+_MODELLING_ROOT = Path(__file__).resolve().parent.parent
+if str(_MODELLING_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MODELLING_ROOT))
+
+import settings  # noqa: E402  modelling/settings.py
+import credentials  # noqa: E402  modelling/credentials.py
+from utils import logging_utils  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-_MODELLING_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _load_module(module_name: str, file_path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load {module_name} from {file_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-settings = _load_module("modelling_settings", _MODELLING_ROOT / "settings.py")
-modelling_secrets = _load_module("modelling_secrets", _MODELLING_ROOT / "secrets.py")
 
 
 def _default_date() -> str:
@@ -46,7 +37,7 @@ def _default_date() -> str:
 def _blob_container_client():
     from azure.storage.blob import BlobServiceClient
 
-    conn = modelling_secrets.MODEL_CACHE_BLOB_CONNECTION_STRING
+    conn = credentials.MODEL_CACHE_BLOB_CONNECTION_STRING
     if not conn:
         raise RuntimeError(
             "Connection string not set. Populate MODEL_CACHE_BLOB_CONNECTION_STRING "
@@ -124,9 +115,7 @@ def main() -> None:
     parser.add_argument("--cache-dir", help="Override target directory")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    # Azure SDK logs every HTTP request at INFO; quiet it.
-    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging_utils.init_logging(name="download_from_azure_blob", log_dir=_MODELLING_ROOT / "logs")
 
     cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else None
     download_all(date=args.date, cache_dir=cache_dir, force=args.force)
