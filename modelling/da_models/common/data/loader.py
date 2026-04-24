@@ -75,6 +75,26 @@ _DEFAULT_PATTERNS: dict[str, tuple[str, ...]] = {
         "next_day_gas_hourly",
         "gas_hourly",
     ),
+    "meteologica_load_forecast": (
+        "meteologica_pjm_load_forecast_hourly_da_cutoff",
+        "meteologica_pjm_load_forecast_hourly",
+        "meteologica_load_forecast",
+    ),
+    "meteologica_solar_forecast": (
+        "meteologica_pjm_solar_forecast_hourly_da_cutoff",
+        "meteologica_pjm_solar_forecast_hourly",
+        "meteologica_solar_forecast",
+    ),
+    "meteologica_wind_forecast": (
+        "meteologica_pjm_wind_forecast_hourly_da_cutoff",
+        "meteologica_pjm_wind_forecast_hourly",
+        "meteologica_wind_forecast",
+    ),
+    "meteologica_net_load_forecast": (
+        "meteologica_pjm_net_load_forecast_hourly_da_cutoff",
+        "meteologica_pjm_net_load_forecast_hourly",
+        "meteologica_net_load_forecast",
+    ),
 }
 
 _DATE_CANDIDATES = ("date", "forecast_date")
@@ -538,6 +558,95 @@ def _normalize_gas_prices_hourly(df: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
+def _normalize_meteologica_regional(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """Normalizer for Meteologica load/solar/wind parquets.
+
+    Input has: forecast_date, hour_ending, region, <value_col>, forecast_rank,
+    forecast_execution_datetime_*. Output keeps the latest forecast per
+    (region, forecast_date, hour_ending) — highest forecast_rank.
+    """
+    output = df.copy()
+    date_col = _first_present(output.columns, ("forecast_date", "date"))
+    hour_col = _first_present(output.columns, _HOUR_CANDIDATES)
+    region_col = _first_present(output.columns, _REGION_CANDIDATES)
+
+    if date_col is None or hour_col is None or region_col is None or value_col not in output.columns:
+        raise KeyError(
+            f"Could not normalize meteologica frame for {value_col!r}; "
+            f"columns: {list(output.columns)}"
+        )
+
+    keep = [date_col, hour_col, region_col, value_col]
+    if "forecast_rank" in output.columns:
+        keep.append("forecast_rank")
+    if "forecast_execution_datetime_local" in output.columns:
+        keep.append("forecast_execution_datetime_local")
+
+    normalized = output[keep].rename(
+        columns={date_col: "date", hour_col: "hour_ending", region_col: "region"}
+    )
+    normalized["date"] = _coerce_date(normalized, "date")
+    normalized["hour_ending"] = _coerce_hour(normalized, "hour_ending")
+    normalized["region"] = normalized["region"].astype(str)
+    normalized[value_col] = pd.to_numeric(normalized[value_col], errors="coerce")
+    normalized = normalized.dropna(subset=["date", "hour_ending", value_col])
+    normalized["hour_ending"] = normalized["hour_ending"].astype(int)
+
+    # Keep only the highest forecast_rank per (region, date, hour_ending)
+    if "forecast_rank" in normalized.columns:
+        normalized["forecast_rank"] = pd.to_numeric(
+            normalized["forecast_rank"], errors="coerce"
+        )
+        normalized = normalized.sort_values("forecast_rank", ascending=False)
+        normalized = normalized.drop_duplicates(
+            subset=["region", "date", "hour_ending"], keep="first"
+        )
+
+    return normalized.sort_values(["region", "date", "hour_ending"]).reset_index(drop=True)
+
+
+def _normalize_meteologica_load(df: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_meteologica_regional(df, "forecast_load_mw")
+
+
+def _normalize_meteologica_solar(df: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_meteologica_regional(df, "solar_forecast")
+
+
+def _normalize_meteologica_wind(df: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_meteologica_regional(df, "wind_forecast")
+
+
+def _normalize_meteologica_net_load(df: pd.DataFrame) -> pd.DataFrame:
+    """Meteologica net_load combines load/solar/wind/net_load per (region, date, he)."""
+    output = df.copy()
+    date_col = _first_present(output.columns, ("forecast_date", "date"))
+    hour_col = _first_present(output.columns, _HOUR_CANDIDATES)
+    region_col = _first_present(output.columns, _REGION_CANDIDATES)
+    value_cols = [
+        c for c in (
+            "forecast_load_mw", "solar_forecast", "wind_forecast", "net_load_forecast_mw",
+        ) if c in output.columns
+    ]
+    if date_col is None or hour_col is None or region_col is None or not value_cols:
+        raise KeyError(
+            "Could not normalize meteologica_net_load_forecast; "
+            f"columns: {list(output.columns)}"
+        )
+    keep = [date_col, hour_col, region_col, *value_cols]
+    normalized = output[keep].rename(
+        columns={date_col: "date", hour_col: "hour_ending", region_col: "region"}
+    )
+    normalized["date"] = _coerce_date(normalized, "date")
+    normalized["hour_ending"] = _coerce_hour(normalized, "hour_ending")
+    normalized["region"] = normalized["region"].astype(str)
+    for col in value_cols:
+        normalized[col] = pd.to_numeric(normalized[col], errors="coerce")
+    normalized = normalized.dropna(subset=["date", "hour_ending"])
+    normalized["hour_ending"] = normalized["hour_ending"].astype(int)
+    return normalized.sort_values(["region", "date", "hour_ending"]).reset_index(drop=True)
+
+
 _NORMALIZERS = {
     "lmps_da": _normalize_lmps_da,
     "load_rt": _normalize_load_rt,
@@ -551,6 +660,10 @@ _NORMALIZERS = {
     "weather_forecast_hourly": _normalize_weather_hourly,
     "weather_hourly": _normalize_weather_hourly,
     "gas_prices_hourly": _normalize_gas_prices_hourly,
+    "meteologica_load_forecast": _normalize_meteologica_load,
+    "meteologica_solar_forecast": _normalize_meteologica_solar,
+    "meteologica_wind_forecast": _normalize_meteologica_wind,
+    "meteologica_net_load_forecast": _normalize_meteologica_net_load,
 }
 
 
@@ -699,3 +812,47 @@ def load_gas_prices_hourly(
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     return _load_dataset("gas_prices_hourly", path=path, cache_dir=cache_dir, columns=columns)
+
+
+def load_meteologica_load_forecast(
+    *,
+    path: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    return _load_dataset(
+        "meteologica_load_forecast", path=path, cache_dir=cache_dir, columns=columns,
+    )
+
+
+def load_meteologica_solar_forecast(
+    *,
+    path: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    return _load_dataset(
+        "meteologica_solar_forecast", path=path, cache_dir=cache_dir, columns=columns,
+    )
+
+
+def load_meteologica_wind_forecast(
+    *,
+    path: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    return _load_dataset(
+        "meteologica_wind_forecast", path=path, cache_dir=cache_dir, columns=columns,
+    )
+
+
+def load_meteologica_net_load_forecast(
+    *,
+    path: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    return _load_dataset(
+        "meteologica_net_load_forecast", path=path, cache_dir=cache_dir, columns=columns,
+    )
