@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------------------
-# Phase 1: Provision PJM modelling Postgres database in Azure.
+# Phase 1: Provision PJM modelling blob storage in Azure.
 #
 # This script provisions:
 #   1) Resource Group
-#   2) Azure PostgreSQL Flexible Server + database
+#   2) Azure Storage Account + Blob Container (model cache)
 #
 # Prerequisites:
 #   - Azure CLI installed and authenticated (az login)
-#   - config.sh populated (subscription, location, DB names)
+#   - config.sh populated (subscription, location, storage names)
 #
 # Usage:
 #   bash azure-infra/01-provision-infrastructure.sh
@@ -43,47 +43,47 @@ else
 fi
 
 echo ""
-if az postgres flexible-server show --resource-group "$RG" --name "$PG_SERVER" --output none 2>/dev/null; then
-  echo "=== PostgreSQL Server '$PG_SERVER' already exists - skipping ==="
+if az storage account show --resource-group "$RG" --name "$STORAGE_ACCOUNT" --output none 2>/dev/null; then
+  echo "=== Storage Account '$STORAGE_ACCOUNT' already exists - skipping ==="
 else
-  echo "=== Creating PostgreSQL Server: $PG_SERVER ==="
-  az postgres flexible-server create \
+  echo "=== Creating Storage Account: $STORAGE_ACCOUNT ==="
+  az storage account create \
     --resource-group "$RG" \
-    --name "$PG_SERVER" \
+    --name "$STORAGE_ACCOUNT" \
     --location "$LOCATION" \
-    --admin-user "$PG_ADMIN" \
-    --admin-password "$PG_PASSWORD" \
-    --sku-name Standard_B1ms \
-    --tier Burstable \
-    --storage-size 32 \
-    --version 15 \
-    --yes \
+    --sku Standard_LRS \
+    --kind StorageV2 \
+    --allow-blob-public-access false \
+    --min-tls-version TLS1_2 \
     --output none
 fi
 
-echo "=== Ensuring Database exists: $PG_DB ==="
-az postgres flexible-server db create \
+echo "=== Fetching storage account key ==="
+STORAGE_KEY=$(az storage account keys list \
   --resource-group "$RG" \
-  --server-name "$PG_SERVER" \
-  --database-name "$PG_DB" \
-  --output none 2>/dev/null || true
+  --account-name "$STORAGE_ACCOUNT" \
+  --query "[0].value" -o tsv)
 
-echo "=== Ensuring firewall rule exists: AllowAzureServices ==="
-az postgres flexible-server firewall-rule create \
-  --resource-group "$RG" \
-  --name "$PG_SERVER" \
-  --rule-name "AllowAzureServices" \
-  --start-ip-address 0.0.0.0 \
-  --end-ip-address 0.0.0.0 \
+echo "=== Ensuring Blob Container exists: $STORAGE_CONTAINER ==="
+az storage container create \
+  --account-name "$STORAGE_ACCOUNT" \
+  --account-key "$STORAGE_KEY" \
+  --name "$STORAGE_CONTAINER" \
   --output none 2>/dev/null || true
-
-PG_HOST="${PG_SERVER}.postgres.database.azure.com"
 
 echo ""
 echo "=== Infrastructure provisioning complete ==="
 echo ""
 echo "Resources ready:"
-echo "  Resource Group:      $RG"
-echo "  PostgreSQL Server:   $PG_SERVER"
-echo "  PostgreSQL Database: $PG_DB"
-echo "  Host:                $PG_HOST"
+echo "  Resource Group:   $RG"
+echo "  Storage Account:  $STORAGE_ACCOUNT"
+echo "  Blob Container:   $STORAGE_CONTAINER"
+echo ""
+echo "Fetch the connection string when you need it (do not commit):"
+echo "  az storage account show-connection-string \\"
+echo "    --resource-group $RG --name $STORAGE_ACCOUNT --query connectionString -o tsv"
+echo ""
+echo "Then set on the Prefect worker:"
+echo "  MODEL_CACHE_BLOB_ENABLED=true"
+echo "  MODEL_CACHE_BLOB_CONTAINER=$STORAGE_CONTAINER"
+echo "  AZURE_STORAGE_CONNECTION_STRING='<paste connection string>'"

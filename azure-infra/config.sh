@@ -11,8 +11,7 @@ LOCATION="eastus2"
 # Resource Group
 RG="helioscta-pjm-rg"
 
-# PostgreSQL
-PG_SERVER="psql-helioscta-pjm"
-PG_ADMIN="pjmadmin"
-PG_PASSWORD="Pjmadmin1!"
-PG_DB="pjm"
+# Blob Storage (model cache)
+# Storage account name must be globally unique, 3-24 chars, lowercase alphanumeric.
+STORAGE_ACCOUNT="stheliosctapjm"
+STORAGE_CONTAINER="model-cache"
