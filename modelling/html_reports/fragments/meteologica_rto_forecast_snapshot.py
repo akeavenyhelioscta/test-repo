@@ -28,10 +28,10 @@ from da_models.common.data.loader import (
     load_meteologica_wind_forecast,
 )
 from html_reports.fragments._forecast_utils import (
-    HE_COLS, OFFPEAK_HOURS, ONPEAK_HOURS, PLOTLY_LOCKED_CONFIG, PLOTLY_TEMPLATE,
+    COLORS, HE_COLS, OFFPEAK_HOURS, ONPEAK_HOURS, PLOTLY_LOCKED_CONFIG, PLOTLY_TEMPLATE,
     SNAPSHOT_STYLE, SUMMARY_COLS,
     cell_class, date_key, day_series, empty_html, fmt_cell, prep_hours,
-    render_ramp_toggle,
+    render_ramp_toggle, single_day_chart,
 )
 from utils.logging_utils import get_logger
 
@@ -116,6 +116,7 @@ def _build_for_region(region_key: str, region_label: str, *, cache_dir: Path) ->
 
         content = SNAPSHOT_STYLE
         content += _render_snapshot_table(day_df, dt_key)
+        content += _render_component_row(day_df, dt_key, region_label)
         content += _render_net_load_row(day_df, dt_key, region_label)
 
         sections.append((section_name, content, None))
@@ -289,7 +290,11 @@ def _render_snapshot_table(day_df: pd.DataFrame, dt_key: str) -> str:
         header += f'<th{cls}>{col}</th>'
     header += '</tr></thead>'
 
-    toggle_btn = f'<button class="rs-toggle" onclick="rsToggle(\'{tid}\')" id="{tid}-btn">Show Ramp</button>'
+    toggle_btn = (
+        f'<div class="rs-toggle-bar">'
+        f'<button class="rs-toggle" onclick="rsToggle(\'{tid}\')" id="{tid}-btn">SHOW RAMP</button>'
+        f'</div>'
+    )
 
     return (
         f'<div class="rs-wrap">{toggle_btn}'
@@ -303,9 +308,9 @@ function rsToggle(tid) {{
   var r = document.getElementById(tid + '-ramp');
   var b = document.getElementById(tid + '-btn');
   if (o.style.display === 'none') {{
-    o.style.display = ''; r.style.display = 'none'; b.textContent = 'Show Ramp';
+    o.style.display = ''; r.style.display = 'none'; b.textContent = 'SHOW RAMP';
   }} else {{
-    o.style.display = 'none'; r.style.display = ''; b.textContent = 'Show Outright';
+    o.style.display = 'none'; r.style.display = ''; b.textContent = 'SHOW OUTRIGHT';
   }}
 }}
 </script>'''
@@ -338,73 +343,132 @@ def _tbl_body(component_rows: list[str], net_rows: list[str]) -> str:
     return "".join(component_rows) + divider + "".join(net_rows)
 
 
+def _render_component_row(day_df: pd.DataFrame, dt_key: str, region_label: str) -> str:
+    """Row 1 per date: three side-by-side subplots for Load / Solar / Wind.
+
+    A single top-right SHOW RAMP button flips all three panels between
+    outright (line+markers) and ramp (bars).
+    """
+    components = [
+        ("load_mw",  "Load",  COLORS["load"]),
+        ("solar_mw", "Solar", COLORS["solar"]),
+        ("wind_mw",  "Wind",  COLORS["wind"]),
+    ]
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=tuple(f"{name} — {region_label}" for _, name, _ in components),
+        horizontal_spacing=0.06,
+    )
+
+    hours = list(range(1, 25))
+    outright_indices: list[int] = []
+    ramp_indices: list[int] = []
+
+    for col_idx, (col_name, label, color) in enumerate(components, start=1):
+        series = day_df.set_index("hour_ending")[col_name].reindex(hours)
+        ramp = series.diff()
+
+        outright_indices.append(len(fig.data))
+        fig.add_trace(go.Scatter(
+            x=hours, y=series.values,
+            mode="lines+markers", name=label,
+            line=dict(color=color, width=2), marker=dict(size=4),
+            showlegend=False,
+            hovertemplate=f"HE %{{x}}<br>{label}: %{{y:,.0f}} MW<extra></extra>",
+        ), row=1, col=col_idx)
+
+        ramp_indices.append(len(fig.data))
+        fig.add_trace(go.Bar(
+            x=hours, y=ramp.values, name=f"{label} Ramp",
+            marker_color=color, opacity=0.85,
+            showlegend=False, visible=False,
+            hovertemplate=f"HE %{{x}}<br>{label} Ramp: %{{y:+,.0f}} MW/hr<extra></extra>",
+        ), row=1, col=col_idx)
+
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE, height=400,
+        margin=dict(l=50, r=20, t=80, b=40),
+        hovermode="x unified",
+    )
+    for col in range(1, 4):
+        fig.update_xaxes(
+            dtick=1, range=[0.5, 24.5], autorange=False, fixedrange=True,
+            title_text="Hour Ending", row=1, col=col,
+        )
+        fig.update_yaxes(title_text="MW", row=1, col=col)
+
+    return render_ramp_toggle(
+        fig, div_id=f"meteo-comp-{dt_key}",
+        outright_indices=outright_indices,
+        ramp_indices=ramp_indices,
+        n_yaxes=3,
+    )
+
+
 def _render_net_load_row(day_df: pd.DataFrame, dt_key: str, region_label: str) -> str:
-    fig = go.Figure()
+    """Row 2 per date: net load stacked area (left) + net load ramp bars (right)."""
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=(f"Net Load Breakdown — {region_label}", "Net Load Ramp"),
+        horizontal_spacing=0.08,
+    )
     hours = day_df["hour_ending"]
     net = day_df["net_load_mw"]
     solar = day_df["solar_mw"]
     wind = day_df["wind_mw"]
     load = day_df["load_mw"]
+    ramp = net.diff()
 
-    outright_indices: list[int] = []
-    ramp_indices: list[int] = []
-
-    outright_indices.append(len(fig.data))
     fig.add_trace(go.Scatter(
         x=hours, y=net, mode="lines", name="Net Load", stackgroup="stack",
-        line=dict(color="#60a5fa", width=1),
+        line=dict(color=COLORS["net_load"], width=1),
         fillcolor="rgba(96, 165, 250, 0.50)",
         hovertemplate="HE %{x}<br>Net Load: %{y:,.0f} MW<extra></extra>",
-    ))
-    outright_indices.append(len(fig.data))
+    ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=hours, y=wind, mode="lines", name="Wind", stackgroup="stack",
-        line=dict(color="#34d399", width=1),
+        line=dict(color=COLORS["wind"], width=1),
         fillcolor="rgba(52, 211, 153, 0.35)",
         hovertemplate="HE %{x}<br>Wind: %{y:,.0f} MW<extra></extra>",
-    ))
-    outright_indices.append(len(fig.data))
+    ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=hours, y=solar, mode="lines", name="Solar", stackgroup="stack",
-        line=dict(color="#fbbf24", width=1),
+        line=dict(color=COLORS["solar"], width=1),
         fillcolor="rgba(251, 191, 36, 0.40)",
         hovertemplate="HE %{x}<br>Solar: %{y:,.0f} MW<extra></extra>",
-    ))
-    outright_indices.append(len(fig.data))
+    ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=hours, y=load, mode="lines", name="Load",
-        line=dict(color="#f8fafc", width=2),
+        line=dict(color=COLORS["gross_load"], width=2),
         hovertemplate="HE %{x}<br>Load: %{y:,.0f} MW<extra></extra>",
-    ))
+    ), row=1, col=1)
 
-    ramp_specs = [
-        ("Load Ramp",     load.diff(),  "#f8fafc"),
-        ("Net Load Ramp", net.diff(),   "#60a5fa"),
-        ("Solar Ramp",    solar.diff(), "#fbbf24"),
-        ("Wind Ramp",     wind.diff(),  "#34d399"),
+    bar_colors = [
+        COLORS["ramp_up"] if (pd.notna(v) and v >= 0) else COLORS["ramp_down"]
+        for v in ramp
     ]
-    for name, series, color in ramp_specs:
-        ramp_indices.append(len(fig.data))
-        fig.add_trace(go.Bar(
-            x=hours, y=series, name=name,
-            marker_color=color, opacity=0.85,
-            visible=False,
-            hovertemplate=f"HE %{{x}}<br>{name}: %{{y:+,.0f}} MW/hr<extra></extra>",
-        ))
+    fig.add_trace(go.Bar(
+        x=hours, y=ramp, name="Net Load Ramp",
+        marker_color=bar_colors, opacity=0.85,
+        hovertemplate="HE %{x}<br>Ramp: %{y:+,.0f} MW/hr<extra></extra>",
+    ), row=1, col=2)
+    fig.add_hline(y=0, line_color="#7f8ea3", line_dash="dash", line_width=1, row=1, col=2)
 
     fig.update_layout(
-        title=f"Net Load Breakdown — {region_label}",
         template=PLOTLY_TEMPLATE, height=470,
-        margin=dict(l=60, r=40, t=60, b=60),
-        legend=dict(orientation="h", yanchor="top", y=-0.12, x=0),
-        hovermode="x unified", barmode="group", bargap=0.15,
+        margin=dict(l=60, r=40, t=80, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.08, x=0),
+        hovermode="x unified", barmode="relative",
     )
-    fig.update_xaxes(title_text="Hour Ending",
-                     dtick=1, range=[0.5, 24.5], autorange=False, fixedrange=True)
-    fig.update_yaxes(title_text="MW", gridcolor="rgba(99,110,250,0.1)")
+    fig.update_xaxes(
+        title_text="Hour Ending",
+        dtick=1, range=[0.5, 24.5], autorange=False, fixedrange=True,
+    )
+    fig.update_yaxes(title_text="MW", col=1)
+    fig.update_yaxes(title_text="MW/hr", col=2)
 
-    return render_ramp_toggle(
-        fig, div_id=f"rs-netload-{dt_key}",
-        outright_indices=outright_indices,
-        ramp_indices=ramp_indices,
+    return fig.to_html(
+        include_plotlyjs="cdn", full_html=False,
+        div_id=f"rs-netload-{dt_key}", config=PLOTLY_LOCKED_CONFIG,
     )

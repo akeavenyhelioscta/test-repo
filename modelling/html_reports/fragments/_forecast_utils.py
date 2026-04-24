@@ -138,6 +138,56 @@ def latest_line_with_ramp(
     )
 
 
+def single_day_chart(
+    values: pd.Series,
+    *,
+    title: str,
+    div_id: str,
+    color: str,
+) -> str:
+    """Single-panel HE1-24 line chart for one day with a ramp toggle.
+
+    ``values`` is a numeric Series indexed by hour_ending (1-24).
+    """
+    if values is None or len(values) == 0 or values.dropna().empty:
+        return empty_html(f"No data for {title}.")
+
+    series = values.reindex(range(1, 25))
+    ramp = series.diff()
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=list(range(1, 25)), y=series.values,
+        mode="lines+markers", name=title,
+        line=dict(color=color, width=2), marker=dict(size=5),
+        hovertemplate="HE %{x}<br>" + title + ": %{y:,.0f} MW<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=list(range(1, 25)), y=ramp.values,
+        name=f"{title} Ramp",
+        marker_color=color, opacity=0.85,
+        visible=False,
+        hovertemplate="HE %{x}<br>Ramp: %{y:+,.0f} MW/hr<extra></extra>",
+    ))
+    fig.update_layout(
+        title=title,
+        template=PLOTLY_TEMPLATE, height=380,
+        margin=dict(l=60, r=40, t=60, b=60),
+        legend=dict(orientation="h", yanchor="top", y=-0.12, x=0),
+        hovermode="x unified",
+    )
+    fig.update_xaxes(
+        title_text="Hour Ending",
+        dtick=1, range=[0.5, 24.5], autorange=False, fixedrange=True,
+    )
+    fig.update_yaxes(title_text="MW", gridcolor="rgba(99,110,250,0.1)")
+
+    return render_ramp_toggle(
+        fig, div_id=div_id,
+        outright_indices=[0], ramp_indices=[1],
+    )
+
+
 def render_ramp_toggle(
     fig: go.Figure,
     *,
@@ -146,15 +196,28 @@ def render_ramp_toggle(
     ramp_indices: list[int],
     y_title_outright: str = "MW",
     y_title_ramp: str = "MW/hr",
+    n_yaxes: int = 1,
 ) -> str:
-    """Wrap a single-subplot figure with a Show Ramp / Show Outright toggle.
+    """Wrap a figure with a Show Ramp / Show Outright toggle (top-right).
 
     The ramp traces must already be added to ``fig`` with ``visible=False``.
-    The button swaps visibility between the two index lists, flips the
-    y-axis title between MW and MW/hr, and triggers an autorange.
+    The button swaps visibility between the two index lists, flips every
+    y-axis title between MW and MW/hr, and triggers autorange.
+
+    ``n_yaxes`` is the number of y-axes to relayout (set to the subplot
+    column count for a rows=1 grid).
     """
     ns = re.sub(r"[^A-Za-z0-9_]", "_", div_id)
     btn_id = f"{div_id}-btn"
+
+    relayout_ramp: dict = {}
+    relayout_out: dict = {}
+    for i in range(1, n_yaxes + 1):
+        suffix = "" if i == 1 else str(i)
+        relayout_ramp[f"yaxis{suffix}.title.text"] = y_title_ramp
+        relayout_ramp[f"yaxis{suffix}.autorange"] = True
+        relayout_out[f"yaxis{suffix}.title.text"] = y_title_outright
+        relayout_out[f"yaxis{suffix}.autorange"] = True
 
     chart_html = fig.to_html(
         include_plotlyjs="cdn", full_html=False,
@@ -162,8 +225,10 @@ def render_ramp_toggle(
     )
 
     toggle_btn = (
+        f'<div class="rs-toggle-bar">'
         f'<button class="rs-toggle" id="{btn_id}" '
-        f'onclick="rsChartToggle_{ns}()">Show Ramp</button>'
+        f'onclick="rsChartToggle_{ns}()">SHOW RAMP</button>'
+        f'</div>'
     )
 
     script = f"""
@@ -173,22 +238,21 @@ def render_ramp_toggle(
   var btnId = {json.dumps(btn_id)};
   var out = {json.dumps(outright_indices)};
   var ramp = {json.dumps(ramp_indices)};
+  var relayoutRamp = {json.dumps(relayout_ramp)};
+  var relayoutOut = {json.dumps(relayout_out)};
 
   window.rsChartToggle_{ns} = function() {{
     var btn = document.getElementById(btnId);
-    var toRamp = (btn.textContent === "Show Ramp");
+    var toRamp = (btn.textContent === "SHOW RAMP");
     out.forEach(function(i) {{ Plotly.restyle(cid, {{visible: !toRamp}}, [i]); }});
     ramp.forEach(function(i) {{ Plotly.restyle(cid, {{visible: toRamp}}, [i]); }});
-    Plotly.relayout(cid, {{
-      "yaxis.title.text": toRamp ? {json.dumps(y_title_ramp)} : {json.dumps(y_title_outright)},
-      "yaxis.autorange": true
-    }});
-    btn.textContent = toRamp ? "Show Outright" : "Show Ramp";
+    Plotly.relayout(cid, toRamp ? relayoutRamp : relayoutOut);
+    btn.textContent = toRamp ? "SHOW OUTRIGHT" : "SHOW RAMP";
   }};
 }})();
 </script>
 """
-    return f'<div class="rs-wrap">{toggle_btn}{chart_html}</div>{script}'
+    return f'{_TOGGLE_STYLE}<div class="rs-wrap">{toggle_btn}{chart_html}</div>{script}'
 
 
 def empty_html(msg: str) -> str:
@@ -209,6 +273,28 @@ def fmt_cell(val, signed: bool = False) -> str:
 
 def date_key(dt) -> str:
     return dt.isoformat() if hasattr(dt, "isoformat") and not isinstance(dt, str) else str(dt)
+
+
+_TOGGLE_STYLE = """
+<style>
+.rs-wrap { position: relative; padding: 0; }
+.rs-toggle-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 10px 12px 0 12px;
+}
+.rs-toggle {
+  padding: 4px 12px; font-size: 11px; font-weight: 600;
+  background: #1a2a42; color: #9eb4d3; border: 1px solid #2a3f60;
+  border-radius: 4px; cursor: pointer; font-family: inherit;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  white-space: nowrap; flex-shrink: 0;
+}
+.rs-toggle:hover { background: #1e3556; color: #dbe7ff; }
+</style>
+"""
 
 
 SNAPSHOT_STYLE = """
@@ -235,12 +321,20 @@ SNAPSHOT_STYLE = """
 .rs-t td.pos { color: #34d399; }
 .rs-t td.neg { color: #f87171; }
 .rs-t td.zero { color: #9eb4d3; }
+.rs-toggle-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 10px 12px 0 12px;
+}
 .rs-toggle {
   padding: 4px 12px; font-size: 11px; font-weight: 600;
-  background: #101d31; color: #9eb4d3; border: 1px solid #2a3f60;
+  background: #1a2a42; color: #9eb4d3; border: 1px solid #2a3f60;
   border-radius: 4px; cursor: pointer; font-family: inherit;
-  margin-bottom: 6px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  white-space: nowrap; flex-shrink: 0;
 }
-.rs-toggle:hover { background: #1a2b44; color: #dbe7ff; }
+.rs-toggle:hover { background: #1e3556; color: #dbe7ff; }
 </style>
 """

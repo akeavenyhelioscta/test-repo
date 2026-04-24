@@ -361,7 +361,11 @@ def _render_snapshot_table(day_df: pd.DataFrame, dt_key: str, *, is_rto: bool) -
         header += f'<th{cls}>{col}</th>'
     header += '</tr></thead>'
 
-    toggle_btn = f'<button class="rs-toggle" onclick="rsToggle(\'{tid}\')" id="{tid}-btn">Show Ramp</button>'
+    toggle_btn = (
+        f'<div class="rs-toggle-bar">'
+        f'<button class="rs-toggle" onclick="rsToggle(\'{tid}\')" id="{tid}-btn">SHOW RAMP</button>'
+        f'</div>'
+    )
 
     return (
         f'<div class="rs-wrap">{toggle_btn}'
@@ -375,9 +379,9 @@ function rsToggle(tid) {{
   var r = document.getElementById(tid + '-ramp');
   var b = document.getElementById(tid + '-btn');
   if (o.style.display === 'none') {{
-    o.style.display = ''; r.style.display = 'none'; b.textContent = 'Show Ramp';
+    o.style.display = ''; r.style.display = 'none'; b.textContent = 'SHOW RAMP';
   }} else {{
-    o.style.display = 'none'; r.style.display = ''; b.textContent = 'Show Outright';
+    o.style.display = 'none'; r.style.display = ''; b.textContent = 'SHOW OUTRIGHT';
   }}
 }}
 </script>'''
