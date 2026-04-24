@@ -1,6 +1,6 @@
 # Registers the ICE next-day gas settles Task Scheduler job.
-# Fires hourly from 08:00 to 14:00 MT (last fire 13:00), daily. The Python
-# orchestration's weekday gate backstops weekend misfires.
+# Fires every 15 min from 06:00 to 10:00 MT (last fire 09:45), daily. The
+# Python orchestration's weekday gate backstops weekend misfires.
 #
 # Requires: Administrator. ICE XL + conda env `helioscta-pjm-da-dev` on the host.
 
@@ -15,14 +15,14 @@ $action = New-ScheduledTaskAction `
     -Execute "cmd.exe" `
     -Argument $cmdArgs
 
-# Every hour from 08:00 for 6 hours (fires at 08, 09, 10, 11, 12, 13 MT).
+# Every 15 min from 06:00 for 4 hours (fires at 06:00, 06:15, …, 09:45 MT).
 # Weekday gating lives in Python.
 # Repetition is copied from a throwaway -Once trigger because Windows
 # PowerShell 5.1 won't let you set .Repetition.Interval directly on a -Daily.
-$trigger = New-ScheduledTaskTrigger -Daily -At "08:00"
-$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At "08:00" `
-    -RepetitionInterval (New-TimeSpan -Hours 1) `
-    -RepetitionDuration (New-TimeSpan -Hours 6)).Repetition
+$trigger = New-ScheduledTaskTrigger -Daily -At "06:00"
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At "06:00" `
+    -RepetitionInterval (New-TimeSpan -Minutes 15) `
+    -RepetitionDuration (New-TimeSpan -Hours 4)).Repetition
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
