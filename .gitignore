@@ -34,6 +34,7 @@ TODO/*
 *.xlsm
 *.xlsb
 *.parquet
+*.html
 
 # cache
 backend/cache/
