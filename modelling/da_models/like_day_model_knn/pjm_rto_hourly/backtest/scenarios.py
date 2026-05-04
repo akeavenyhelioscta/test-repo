@@ -46,37 +46,42 @@ SCENARIOS: dict[str, dict] = {
     },
 
     # TODO: add your perturbations. Examples below — uncomment to enable.
-    #
-    # "heavy_load_peak": {
-    #     "weights": {
-    #         "load_peak": 7.0, "load_evening": 2.0, "load_midday": 2.0,
-    #         "load_morning": 1.5, "load_overnight": 1.0,
-    #         "solar_level": 0.5, "wind_level": 0.5,
-    #         "outage_level": 1.0, "gas_level": 0.5,
-    #     },
-    #     "overrides": {},
-    # },
-    #
-    # "outage_driven": {
-    #     "weights": {
-    #         "load_peak": 2.0, "load_evening": 1.0, "load_midday": 1.0,
-    #         "load_morning": 1.0, "load_overnight": 0.5,
-    #         "solar_level": 1.0, "wind_level": 1.0,
-    #         "outage_level": 6.0, "gas_level": 1.0,
-    #     },
-    #     "overrides": {},
-    # },
-    #
-    # "renewables_first": {
-    #     "weights": {
-    #         "load_peak": 1.5, "load_evening": 1.0, "load_midday": 1.0,
-    #         "load_morning": 0.75, "load_overnight": 0.5,
-    #         "solar_level": 4.0, "wind_level": 4.0,
-    #         "outage_level": 2.0, "gas_level": 1.0,
-    #     },
-    #     "overrides": {},
-    # },
-    #
+    
+    "heavy_load_peak": {
+        "weights": {
+            "load_peak": 7.0, "load_evening": 2.0, "load_midday": 2.0,
+            "load_morning": 1.5, "load_overnight": 1.0,
+            "solar_level": 0.5, "wind_level": 0.5,
+            "outage_level": 1.0, "gas_level": 0.5,
+        },
+        "overrides": {},
+    },
+    
+    # The OLD spec defaults (pre-2026-05-04). Kept as an ablation so
+    # backtests can compare the current `default` against the prior
+    # weights — useful for confirming the new defaults still beat the
+    # old ones on fresh data, and as a regression detector if domain
+    # weights drift.
+    "previous_default": {
+        "weights": {
+            "load_peak": 3.5, "load_evening": 2.0, "load_midday": 2.0,
+            "load_morning": 1.5, "load_overnight": 1.0,
+            "solar_level": 1.5, "wind_level": 1.5,
+            "outage_level": 2.0, "gas_level": 1.0,
+        },
+        "overrides": {},
+    },
+    
+    "renewables_first": {
+        "weights": {
+            "load_peak": 1.5, "load_evening": 1.0, "load_midday": 1.0,
+            "load_morning": 0.75, "load_overnight": 0.5,
+            "solar_level": 4.0, "wind_level": 4.0,
+            "outage_level": 2.0, "gas_level": 1.0,
+        },
+        "overrides": {},
+    },
+    
     # "no_window": {"weights": None, "overrides": {"flt_radius": 0}},
     # "more_analogs": {"weights": None, "overrides": {"n_analogs": 40}},
     # "tight_season": {"weights": None, "overrides": {"season_window_days": 30}},

@@ -120,12 +120,17 @@ RTO_LOAD_PROFILE = FeatureDomain(
         "load_peak":      [f"load_h{h}" for h in range(17, 21)],
         "load_evening":   [f"load_h{h}" for h in range(21, 25)],
     },
+    # Tuned 2026-05-04 from the `outage_driven` scenario — see
+    # backtest/scenarios.py and the 28-day param_sweep result that beat
+    # the prior weights by 5.4% mean MAE / 7% rMAE. Outages now carry
+    # most of the date-level signal (renormalized share ~43%); load
+    # groups proportionally smaller (~39% combined, was ~62%).
     feature_group_weights={
-        "load_overnight": 1.0,
-        "load_morning":   1.5,
-        "load_midday":    2.0,
-        "load_peak":      3.5,
-        "load_evening":   2.0,
+        "load_overnight": 0.5,
+        "load_morning":   1.0,
+        "load_midday":    1.0,
+        "load_peak":      2.0,
+        "load_evening":   1.0,
     },
     pool_builder=_build_rto_load_profile_pool,
     query_builder=_build_rto_load_profile_query,
@@ -156,7 +161,7 @@ SOLAR_PROFILE = FeatureDomain(
     name="solar_profile",
     description="Solar — 24 hourly level cols (solar_h1..solar_h24).",
     feature_groups={"solar_level": SOLAR_HOURLY_COLS},
-    feature_group_weights={"solar_level": 1.5},
+    feature_group_weights={"solar_level": 1.0},
     pool_builder=_build_solar_profile_pool,
     query_builder=_build_solar_profile_query,
 )
@@ -182,7 +187,7 @@ WIND_PROFILE = FeatureDomain(
     name="wind_profile",
     description="Wind — 24 hourly level cols (wind_h1..wind_h24).",
     feature_groups={"wind_level": WIND_HOURLY_COLS},
-    feature_group_weights={"wind_level": 1.5},
+    feature_group_weights={"wind_level": 1.0},
     pool_builder=_build_wind_profile_pool,
     query_builder=_build_wind_profile_query,
 )
@@ -239,7 +244,7 @@ OUTAGES_LEVEL = FeatureDomain(
     name="outages_level",
     description="RTO outages — 3 daily level cols (total/planned/forced MW). Broadcast across HEs.",
     feature_groups={"outage_level": OUTAGE_LEVEL_COLS},
-    feature_group_weights={"outage_level": 2.0},
+    feature_group_weights={"outage_level": 6.0},
     pool_builder=_build_outages_level_pool,
     query_builder=_build_outages_level_query,
 )
