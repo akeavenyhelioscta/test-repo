@@ -41,6 +41,9 @@ if str(_MODELLING_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from da_models.like_day_model_knn import _shared, configs  # noqa: E402
+from da_models.like_day_model_knn.pjm_rto_hourly.backtest.scenarios import (  # noqa: E402
+    SCENARIOS,
+)
 from da_models.like_day_model_knn.pjm_rto_hourly.builder import (  # noqa: E402
     build_pool, build_query_row,
 )
@@ -55,46 +58,8 @@ from da_models.like_day_model_knn.pjm_rto_hourly.pipelines.forecast_single_day i
 # ── Defaults (edit here instead of using CLI flags) ────────────────────────
 TARGET_DATE: date | None = date(2026, 4, 30)   # None -> yesterday (date.today() - 1d)
 MODEL_NAME: str = configs.PJM_RTO_HOURLY_SPEC.name
-
-# Each scenario:
-#     "<name>": {
-#         "weights": {group: raw_weight, ...} | None,    # None -> spec defaults
-#         "overrides": {run_kwarg: value, ...},          # any forecast_run() kwarg
-#     }
-# Weights are RAW multipliers — renormalized to sum=1.0 inside the engine.
-# Overrides can carry e.g. flt_radius=0, n_analogs=30, season_window_days=90.
-#
-# Valid weight keys (from PJM_RTO_HOURLY_SPEC.feature_groups):
-#   load_overnight, load_morning, load_midday, load_peak, load_evening,
-#   solar_level, wind_level, outage_level, gas_level
-SCENARIOS: dict[str, dict] = {
-    "default": {
-        "weights": None,
-        "overrides": {},
-    },
-    # TODO: add your perturbations. Examples:
-    #
-    # "heavy_load_peak": {
-    #     "weights": {
-    #         "load_peak": 7.0, "load_evening": 2.0, "load_midday": 2.0,
-    #         "load_morning": 1.5, "load_overnight": 1.0,
-    #         "solar_level": 0.5, "wind_level": 0.5,
-    #         "outage_level": 1.0, "gas_level": 0.5,
-    #     },
-    #     "overrides": {},
-    # },
-    # "outage_driven": {
-    #     "weights": {
-    #         "load_peak": 2.0, "load_evening": 1.0, "load_midday": 1.0,
-    #         "load_morning": 1.0, "load_overnight": 0.5,
-    #         "solar_level": 1.0, "wind_level": 1.0,
-    #         "outage_level": 6.0, "gas_level": 1.0,
-    #     },
-    #     "overrides": {},
-    # },
-    # "no_window": {"weights": None, "overrides": {"flt_radius": 0}},
-    # "more_analogs": {"weights": None, "overrides": {"n_analogs": 40}},
-}
+# Scenarios live in scenarios.py (shared with param_sweep). Edit there
+# to add/remove perturbations; both backtest scripts pick up the change.
 
 _RUN_KWARGS_PASSTHROUGH: tuple[str, ...] = (
     "flt_radius", "n_analogs", "season_window_days", "min_pool_size",
