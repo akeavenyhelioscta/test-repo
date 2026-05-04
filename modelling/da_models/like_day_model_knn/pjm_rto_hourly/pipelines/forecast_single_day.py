@@ -54,7 +54,7 @@ from da_models.like_day_model_knn.pjm_rto_hourly.printers import (  # noqa: E402
 
 # ── Defaults (edit here instead of using CLI flags) ────────────────────────
 TARGET_DATE: date | None = None                            # None -> tomorrow (date.today() + 1d)
-MODEL_NAME: str = configs.PJM_RTO_HOURLY_SPEC.name         # or "pjm_rto_hourly_levels"
+MODEL_NAME: str = configs.PJM_RTO_HOURLY_SPEC.name
 FLT_RADIUS: int = configs.PJM_RTO_HOURLY_SPEC.flt_radius
 N_ANALOGS: int | None = None                               # None -> configs.DEFAULT_N_ANALOGS
 SEASON_WINDOW_DAYS: int | None = None                      # None -> configs.SEASON_WINDOW_DAYS
@@ -70,12 +70,7 @@ DEFAULT_QUANTILES: tuple[float, ...] = (
     0.25, 0.375, 0.50, 0.625, 0.75,
     0.90, 0.95, 0.99,
 )
-DISPLAY_QUANTILES: tuple[float, ...] = (0.25, 0.375, 0.50, 0.625, 0.75)
-
-_PJM_RTO_HOURLY_MODELS: tuple[str, ...] = (
-    configs.PJM_RTO_HOURLY_SPEC.name,
-    configs.PJM_RTO_HOURLY_LEVELS_SPEC.name,
-)
+DISPLAY_QUANTILES: tuple[float, ...] = DEFAULT_QUANTILES
 
 
 def _resolve_target_date(target_date: date | None) -> date:
@@ -113,9 +108,9 @@ def run(
         if callable(reconfigure):
             reconfigure(encoding="utf-8", errors="replace")
 
-    if model_name not in _PJM_RTO_HOURLY_MODELS:
+    if model_name not in configs.MODEL_REGISTRY:
         raise ValueError(
-            f"model_name='{model_name}' not in pjm_rto_hourly family {_PJM_RTO_HOURLY_MODELS}"
+            f"model_name='{model_name}' not in MODEL_REGISTRY {tuple(configs.MODEL_REGISTRY.keys())}"
         )
 
     resolved_date = _resolve_target_date(target_date)
