@@ -39,6 +39,9 @@ if str(_MODELLING_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODELLING_ROOT))
 
 import pandas as pd  # noqa: E402
+from colorama import Fore, Style, init as colorama_init  # noqa: E402
+
+colorama_init()
 
 from da_models.like_day_model_knn import _shared, configs  # noqa: E402
 from da_models.like_day_model_knn.pjm_rto_hourly.backtest.scenarios import (  # noqa: E402
@@ -177,6 +180,7 @@ def _execute_scenario(
         "hourly_actual": hourly_actual,
         "hourly_abs_error": hourly_abs_error,
         "hourly_in_90pi": hourly_in_90pi,
+        "output_table": output_table,
         "duration_s": round(time.perf_counter() - started, 3),
     })
     return base
@@ -244,86 +248,54 @@ def _print_comparison(
     print()
 
 
-def _print_hourly_scenarios(rows: list[dict], target_date: date) -> None:
-    """Per-scenario forecast / error tables in the DA LMP LIKE-DAY FORECAST format.
+_HL_FORECAST_LOCAL = Style.BRIGHT + Fore.RED
+_RS_LOCAL = Style.RESET_ALL
 
-    Mirrors ``forecast_single_day.print_forecast`` but stacks one row per
-    scenario instead of a single Forecast row. Two tables:
 
-      1. Forecasts — Actual on top, then one row per scenario showing
-         that scenario's Forecast across HE1..HE24 plus OnPk/OffPk/Flat.
-      2. Errors — one row per scenario showing signed (Forecast - Actual)
-         across HE1..HE24 plus OnPk/OffPk/Flat.
+def _print_per_scenario_detail(rows: list[dict], target_date: date) -> None:
+    """One Actual / Forecast / Error block per scenario.
 
-    Same fixed-width formatting as the live forecast table for visual
-    consistency.
+    Mirrors the per-run table that ``forecast_single_day.print_forecast``
+    prints (Date | Type | HE1..HE24 | OnPk | OffPk | Flat). Forecast row
+    is colorized bright red — same visual cue as the live forecast.
     """
     ok = [r for r in rows if r["status"] == "ok"]
     if not ok:
         return
-    hourly_actual = ok[0].get("hourly_actual")
-    if hourly_actual is None or all(v is None for v in hourly_actual):
-        return
 
-    onpeak_hes = list(range(8, 24))
-    offpeak_hes = list(range(1, 8)) + [24]
-
-    def _summary(values: list[float | None]) -> tuple[float | None, float | None, float | None]:
-        on = [values[h - 1] for h in onpeak_hes if values[h - 1] is not None]
-        off = [values[h - 1] for h in offpeak_hes if values[h - 1] is not None]
-        all_v = [v for v in values if v is not None]
-        return (
-            (sum(on) / len(on)) if on else None,
-            (sum(off) / len(off)) if off else None,
-            (sum(all_v) / len(all_v)) if all_v else None,
-        )
-
-    name_w = max(16, max(len(r["scenario_name"]) for r in ok))
-
-    def _render_row(label: str, values: list[float | None]) -> str:
-        line = f"{str(target_date):<12} {label:<{name_w}}"
-        for v in values:
-            line += f" {v:>6.1f}" if v is not None else f" {'':>6}"
-        on, off, flat = _summary(values)
-        line += f" {on:>7.2f}" if on is not None else f" {'':>7}"
-        line += f" {off:>7.2f}" if off is not None else f" {'':>7}"
-        line += f" {flat:>7.2f}" if flat is not None else f" {'':>7}"
-        return line
-
-    # ── Forecasts table ────────────────────────────────────────────────
-    print("=" * 120)
-    print(f"  HOURLY FORECASTS BY SCENARIO — Western Hub ($/MWh) — {target_date}")
-    print("=" * 120)
-    header = f"{'Date':<12} {'Type':<{name_w}}"
+    header = f"{'Date':<12} {'Type':<10}"
     for h in range(1, 25):
         header += f" {h:>6}"
     header += f" {'OnPk':>7} {'OffPk':>7} {'Flat':>7}"
-    print(header)
-    print("-" * len(header))
+    sep_len = len(header)
 
-    print(_render_row("Actual", hourly_actual))
     for r in ok:
-        forecast_vals = r.get("hourly_forecast") or [None] * 24
-        print(_render_row(r["scenario_name"], forecast_vals))
-    print("-" * len(header))
-    print()
+        table = r.get("output_table")
+        if table is None or len(table) == 0:
+            continue
 
-    # ── Errors table (signed: forecast - actual) ───────────────────────
-    print("=" * 120)
-    print(f"  HOURLY ERRORS BY SCENARIO (Forecast - Actual, $/MWh) — {target_date}")
-    print("=" * 120)
-    print(header)
-    print("-" * len(header))
-    for r in ok:
-        forecast_vals = r.get("hourly_forecast") or [None] * 24
-        signed_err = [
-            (forecast_vals[i] - hourly_actual[i])
-            if (forecast_vals[i] is not None and hourly_actual[i] is not None) else None
-            for i in range(24)
-        ]
-        print(_render_row(r["scenario_name"], signed_err))
-    print("-" * len(header))
-    print()
+        print("=" * 120)
+        print(f"  HOURLY DETAIL: {r['scenario_name']}  —  Western Hub ($/MWh) — {target_date}")
+        if r.get("mae") is not None:
+            print(f"  MAE: ${r['mae']:.2f}/MWh  |  RMSE: ${r['rmse']:.2f}/MWh  |  rMAE: {r['rmae']:.3f}")
+        print("=" * 120)
+        print(header)
+        print("-" * sep_len)
+
+        for _, row in table.iterrows():
+            line = f"{str(row['Date']):<12} {row['Type']:<10}"
+            for h in range(1, 25):
+                val = row.get(f"HE{h}")
+                line += f" {val:>6.1f}" if pd.notna(val) else f" {'':>6}"
+            for col in ("OnPeak", "OffPeak", "Flat"):
+                v = row.get(col)
+                line += f" {v:>7.2f}" if pd.notna(v) else f" {'':>7}"
+            if row["Type"] == "Forecast":
+                line = f"{_HL_FORECAST_LOCAL}{line}{_RS_LOCAL}"
+            print(line)
+
+        print("-" * sep_len)
+        print()
 
 
 def run(
@@ -397,7 +369,7 @@ def run(
         rows.append(row)
 
     _print_comparison(rows, resolved_date, actuals_summary)
-    _print_hourly_scenarios(rows, resolved_date)
+    _print_per_scenario_detail(rows, resolved_date)
     return rows
 
 
