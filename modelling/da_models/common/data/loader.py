@@ -10,39 +10,42 @@ import pandas as pd
 from da_models.common.configs import CACHE_DIR
 
 _DEFAULT_PATTERNS: dict[str, tuple[str, ...]] = {
-    "lmps_da":                       ("pjm_lmps_hourly",),
-    "lmps_rt":                       ("pjm_lmps_hourly",),
-    "load_rt":                       ("pjm_load_rt_hourly",),
-    "load_forecast":                 ("pjm_load_forecast_hourly_da_cutoff",),
-    "fuel_mix":                      ("pjm_fuel_mix_hourly",),
-    "outages_actual":                ("pjm_outages_actual_daily",),
-    "outages_forecast":              ("pjm_outages_forecast_daily",),
-    "outages_forecast_history":      ("pjm_outages_forecast_history",),
-    "solar_forecast":                ("pjm_solar_forecast_hourly_da_cutoff",),
-    "wind_forecast":                 ("pjm_wind_forecast_hourly_da_cutoff",),
-    "weather_observed_hourly":       ("wsi_pjm_hourly_observed_temp",),
-    "weather_forecast_hourly":       ("wsi_pjm_hourly_forecast_temp_latest",),
+    "lmps_da": ("pjm_lmps_hourly",),
+    "lmps_da_sep": ("pjm_lmps_hourly",),
+    "lmps_rt": ("pjm_lmps_hourly",),
+    "load_rt": ("pjm_load_rt_hourly",),
+    "load_forecast": ("pjm_load_forecast_hourly_da_cutoff",),
+    "fuel_mix": ("pjm_fuel_mix_hourly",),
+    "outages_actual": ("pjm_outages_actual_daily",),
+    "outages_forecast": ("pjm_outages_forecast_daily",),
+    "outages_forecast_history": ("pjm_outages_forecast_history",),
+    "solar_forecast": ("pjm_solar_forecast_hourly_da_cutoff",),
+    "wind_forecast": ("pjm_wind_forecast_hourly_da_cutoff",),
+    "weather_observed_hourly": ("wsi_pjm_hourly_observed_temp",),
+    "weather_forecast_hourly": ("wsi_pjm_hourly_forecast_temp_latest",),
     # Backward-compatible: observed first, latest forecast as fallback.
     "weather_hourly": (
         "wsi_pjm_hourly_observed_temp",
         "wsi_pjm_hourly_forecast_temp_latest",
     ),
-    "gas_prices_hourly":             ("ice_python_next_day_gas_hourly",),
-    "meteologica_load_forecast":     ("meteologica_pjm_load_forecast_hourly_da_cutoff",),
-    "meteologica_solar_forecast":    ("meteologica_pjm_solar_forecast_hourly_da_cutoff",),
-    "meteologica_wind_forecast":     ("meteologica_pjm_wind_forecast_hourly_da_cutoff",),
-    "meteologica_net_load_forecast": ("meteologica_pjm_net_load_forecast_hourly_da_cutoff",),
+    "gas_prices_hourly": ("ice_python_next_day_gas_hourly",),
+    "meteologica_load_forecast": ("meteologica_pjm_load_forecast_hourly_da_cutoff",),
+    "meteologica_solar_forecast": ("meteologica_pjm_solar_forecast_hourly_da_cutoff",),
+    "meteologica_wind_forecast": ("meteologica_pjm_wind_forecast_hourly_da_cutoff",),
+    "meteologica_net_load_forecast": (
+        "meteologica_pjm_net_load_forecast_hourly_da_cutoff",
+    ),
     # PJM-native net-load forecast only (no Meteologica fallback).
-    "pjm_net_load_forecast":         ("pjm_net_load_forecast_hourly_da_cutoff",),
+    "pjm_net_load_forecast": ("pjm_net_load_forecast_hourly_da_cutoff",),
     # PJM-native preferred; falls back to Meteologica when missing.
     "net_load_forecast": (
         "pjm_net_load_forecast_hourly_da_cutoff",
         "meteologica_pjm_net_load_forecast_hourly_da_cutoff",
     ),
-    "net_load_actual":               ("pjm_net_load_rt_hourly",),
-    "day_gen_capacity":              ("pjm_day_gen_capacity_daily",),
-    "installed_capacity":            ("ea_pjm_installed_capacity_monthly",),
-    "pjm_dates_daily":               ("pjm_dates_daily",),
+    "net_load_actual": ("pjm_net_load_rt_hourly",),
+    "day_gen_capacity": ("pjm_day_gen_capacity_daily",),
+    "installed_capacity": ("ea_pjm_installed_capacity_monthly",),
+    "pjm_dates_daily": ("pjm_dates_daily",),
 }
 
 _DATE_CANDIDATES = ("date", "forecast_date")
@@ -103,7 +106,9 @@ def _coerce_hour(df: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(df[column], errors="coerce").astype("Int64")
 
 
-def _apply_column_filter(df: pd.DataFrame, columns: Iterable[str] | None) -> pd.DataFrame:
+def _apply_column_filter(
+    df: pd.DataFrame, columns: Iterable[str] | None
+) -> pd.DataFrame:
     if columns is None:
         return df
     keep = [column for column in columns if column in df.columns]
@@ -148,6 +153,57 @@ def _normalize_lmps_da(df: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
+def _normalize_lmps_da_sep(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the DA System Energy Price component from pjm_lmps_hourly.
+
+    SEP is system-wide (uniform across nodes), but the parquet stores it
+    per (hub, hour). We carry the ``hub`` (region) column through so callers
+    can filter to a single row per (date, HE) — picking any one hub yields
+    the same SEP series.
+    """
+    output = df.copy()
+    if "market" in output.columns:
+        output = output[output["market"].astype(str).str.lower() == "da"].copy()
+
+    date_col = _first_present(output.columns, _DATE_CANDIDATES)
+    hour_col = _first_present(output.columns, _HOUR_CANDIDATES)
+    region_col = _first_present(output.columns, _REGION_CANDIDATES)
+    sep_col = "lmp_system_energy_price"
+
+    required = {
+        "date": date_col,
+        "hour_ending": hour_col,
+        "region": region_col,
+        "lmp_system_energy_price": sep_col if sep_col in output.columns else None,
+    }
+    missing = [name for name, column in required.items() if column is None]
+    if missing:
+        raise KeyError(
+            f"Could not normalize lmps_da_sep; missing fields: {missing}. "
+            f"Columns: {list(output.columns)}"
+        )
+
+    normalized = output[
+        [
+            required["date"],
+            required["hour_ending"],
+            required["region"],
+            required["lmp_system_energy_price"],
+        ]
+    ].rename(columns={v: k for k, v in required.items()})
+    normalized["date"] = _coerce_date(normalized, "date")
+    normalized["hour_ending"] = _coerce_hour(normalized, "hour_ending")
+    normalized["lmp_system_energy_price"] = pd.to_numeric(
+        normalized["lmp_system_energy_price"], errors="coerce"
+    )
+    normalized["region"] = normalized["region"].astype(str)
+    normalized = normalized.dropna(
+        subset=["date", "hour_ending", "lmp_system_energy_price"]
+    )
+    normalized["hour_ending"] = normalized["hour_ending"].astype(int)
+    return normalized
+
+
 def _normalize_lmps_rt(df: pd.DataFrame) -> pd.DataFrame:
     output = df.copy()
     if "market" in output.columns:
@@ -174,7 +230,12 @@ def _normalize_lmps_rt(df: pd.DataFrame) -> pd.DataFrame:
             f"Columns: {list(output.columns)}"
         )
 
-    keep = [required["date"], required["hour_ending"], required["region"], required["lmp"]]
+    keep = [
+        required["date"],
+        required["hour_ending"],
+        required["region"],
+        required["lmp"],
+    ]
     if "rt_source" in output.columns:
         keep.append("rt_source")
     normalized = output[keep].rename(columns={v: k for k, v in required.items()})
@@ -195,7 +256,9 @@ def _normalize_lmps_rt(df: pd.DataFrame) -> pd.DataFrame:
             .drop_duplicates(subset=["region", "date", "hour_ending"], keep="first")
             .drop(columns=["_verified_rank", "rt_source"])
         )
-    return normalized.sort_values(["region", "date", "hour_ending"]).reset_index(drop=True)
+    return normalized.sort_values(["region", "date", "hour_ending"]).reset_index(
+        drop=True
+    )
 
 
 def _normalize_load_rt(df: pd.DataFrame) -> pd.DataFrame:
@@ -218,7 +281,12 @@ def _normalize_load_rt(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     normalized = output[
-        [required["date"], required["hour_ending"], required["region"], required["rt_load_mw"]]
+        [
+            required["date"],
+            required["hour_ending"],
+            required["region"],
+            required["rt_load_mw"],
+        ]
     ].rename(columns={v: k for k, v in required.items()})
     normalized["date"] = _coerce_date(normalized, "date")
     normalized["hour_ending"] = _coerce_hour(normalized, "hour_ending")
@@ -257,16 +325,24 @@ def _normalize_load_forecast(df: pd.DataFrame) -> pd.DataFrame:
     ]
     if "as_of_date" in output.columns:
         keep.append("as_of_date")
+    if "forecast_execution_datetime_local" in output.columns:
+        keep.append("forecast_execution_datetime_local")
 
     normalized = output[keep].rename(columns={v: k for k, v in required.items()})
     normalized["date"] = _coerce_date(normalized, "date")
     normalized["hour_ending"] = _coerce_hour(normalized, "hour_ending")
-    normalized["forecast_load_mw"] = pd.to_numeric(normalized["forecast_load_mw"], errors="coerce")
+    normalized["forecast_load_mw"] = pd.to_numeric(
+        normalized["forecast_load_mw"], errors="coerce"
+    )
     normalized["region"] = normalized["region"].astype(str)
     normalized = normalized.dropna(subset=["date", "hour_ending", "forecast_load_mw"])
     normalized["hour_ending"] = normalized["hour_ending"].astype(int)
     if "as_of_date" in normalized.columns:
         normalized["as_of_date"] = _coerce_date(normalized, "as_of_date")
+    if "forecast_execution_datetime_local" in normalized.columns:
+        normalized["forecast_execution_datetime_local"] = pd.to_datetime(
+            normalized["forecast_execution_datetime_local"], errors="coerce"
+        )
     return normalized
 
 
@@ -292,7 +368,8 @@ def _normalize_fuel_mix(df: pd.DataFrame) -> pd.DataFrame:
     numeric_columns = [
         column
         for column in output.columns
-        if column not in metadata_columns and pd.api.types.is_numeric_dtype(output[column])
+        if column not in metadata_columns
+        and pd.api.types.is_numeric_dtype(output[column])
     ]
     normalized = output[[date_col, hour_col, *numeric_columns]].rename(
         columns={date_col: "date", hour_col: "hour_ending"}
@@ -306,7 +383,9 @@ def _normalize_fuel_mix(df: pd.DataFrame) -> pd.DataFrame:
 
 def _normalize_outages_actual(df: pd.DataFrame) -> pd.DataFrame:
     output = df.copy()
-    date_col = _first_present(output.columns, ("date", "forecast_date", "forecast_execution_date"))
+    date_col = _first_present(
+        output.columns, ("date", "forecast_date", "forecast_execution_date")
+    )
     region_col = _first_present(output.columns, _REGION_CANDIDATES)
     outage_columns = [
         column
@@ -371,10 +450,14 @@ def _normalize_outages_forecast(df: pd.DataFrame) -> pd.DataFrame:
     normalized["region"] = normalized["region"].astype(str)
     if exec_col is not None:
         normalized = normalized.rename(columns={exec_col: "forecast_execution_date"})
-        normalized["forecast_execution_date"] = _coerce_date(normalized, "forecast_execution_date")
+        normalized["forecast_execution_date"] = _coerce_date(
+            normalized, "forecast_execution_date"
+        )
         if "forecast_day_number" not in normalized.columns:
             date_ts = pd.to_datetime(normalized["date"], errors="coerce")
-            exec_ts = pd.to_datetime(normalized["forecast_execution_date"], errors="coerce")
+            exec_ts = pd.to_datetime(
+                normalized["forecast_execution_date"], errors="coerce"
+            )
             normalized["forecast_day_number"] = (date_ts - exec_ts).dt.days + 1
     for column in outage_columns:
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
@@ -383,9 +466,9 @@ def _normalize_outages_forecast(df: pd.DataFrame) -> pd.DataFrame:
             normalized["forecast_day_number"], errors="coerce"
         ).astype("Int64")
     if "forecast_rank" in normalized.columns:
-        normalized["forecast_rank"] = pd.to_numeric(normalized["forecast_rank"], errors="coerce").astype(
-            "Int64"
-        )
+        normalized["forecast_rank"] = pd.to_numeric(
+            normalized["forecast_rank"], errors="coerce"
+        ).astype("Int64")
     normalized = normalized.dropna(subset=["date"])
     return normalized
 
@@ -411,7 +494,11 @@ def _normalize_outages_forecast_history(df: pd.DataFrame) -> pd.DataFrame:
         if column in output.columns
     ]
 
-    if "forecast_date" not in output.columns or region_col is None or not outage_columns:
+    if (
+        "forecast_date" not in output.columns
+        or region_col is None
+        or not outage_columns
+    ):
         raise KeyError(
             "Could not normalize outages_forecast_history; expected "
             "forecast_date/region/outage columns. "
@@ -427,13 +514,17 @@ def _normalize_outages_forecast_history(df: pd.DataFrame) -> pd.DataFrame:
             output[date_col] = pd.to_datetime(output[date_col], errors="coerce").dt.date
 
     if "lead_days" in output.columns:
-        output["lead_days"] = pd.to_numeric(output["lead_days"], errors="coerce").astype("Int64")
+        output["lead_days"] = pd.to_numeric(
+            output["lead_days"], errors="coerce"
+        ).astype("Int64")
 
     for column in outage_columns:
         output[column] = pd.to_numeric(output[column], errors="coerce")
 
     output = output.dropna(subset=["forecast_date"])
-    sort_cols = [c for c in ("region", "forecast_date", "as_of_date") if c in output.columns]
+    sort_cols = [
+        c for c in ("region", "forecast_date", "as_of_date") if c in output.columns
+    ]
     if sort_cols:
         output = output.sort_values(sort_cols).reset_index(drop=True)
     return output
@@ -456,12 +547,16 @@ def _normalize_solar_forecast(df: pd.DataFrame) -> pd.DataFrame:
         keep.append("solar_forecast_btm")
     if "as_of_date" in output.columns:
         keep.append("as_of_date")
+    if "forecast_execution_datetime_local" in output.columns:
+        keep.append("forecast_execution_datetime_local")
     normalized = output[keep].rename(
         columns={date_col: "date", hour_col: "hour_ending", solar_col: "solar_forecast"}
     )
     normalized["date"] = _coerce_date(normalized, "date")
     normalized["hour_ending"] = _coerce_hour(normalized, "hour_ending")
-    normalized["solar_forecast"] = pd.to_numeric(normalized["solar_forecast"], errors="coerce")
+    normalized["solar_forecast"] = pd.to_numeric(
+        normalized["solar_forecast"], errors="coerce"
+    )
     if "solar_forecast_btm" in normalized.columns:
         normalized["solar_forecast_btm"] = pd.to_numeric(
             normalized["solar_forecast_btm"], errors="coerce"
@@ -470,6 +565,10 @@ def _normalize_solar_forecast(df: pd.DataFrame) -> pd.DataFrame:
     normalized["hour_ending"] = normalized["hour_ending"].astype(int)
     if "as_of_date" in normalized.columns:
         normalized["as_of_date"] = _coerce_date(normalized, "as_of_date")
+    if "forecast_execution_datetime_local" in normalized.columns:
+        normalized["forecast_execution_datetime_local"] = pd.to_datetime(
+            normalized["forecast_execution_datetime_local"], errors="coerce"
+        )
     return normalized
 
 
@@ -488,17 +587,25 @@ def _normalize_wind_forecast(df: pd.DataFrame) -> pd.DataFrame:
     keep = [date_col, hour_col, wind_col]
     if "as_of_date" in output.columns:
         keep.append("as_of_date")
+    if "forecast_execution_datetime_local" in output.columns:
+        keep.append("forecast_execution_datetime_local")
 
     normalized = output[keep].rename(
         columns={date_col: "date", hour_col: "hour_ending", wind_col: "wind_forecast"}
     )
     normalized["date"] = _coerce_date(normalized, "date")
     normalized["hour_ending"] = _coerce_hour(normalized, "hour_ending")
-    normalized["wind_forecast"] = pd.to_numeric(normalized["wind_forecast"], errors="coerce")
+    normalized["wind_forecast"] = pd.to_numeric(
+        normalized["wind_forecast"], errors="coerce"
+    )
     normalized = normalized.dropna(subset=["date", "hour_ending", "wind_forecast"])
     normalized["hour_ending"] = normalized["hour_ending"].astype(int)
     if "as_of_date" in normalized.columns:
         normalized["as_of_date"] = _coerce_date(normalized, "as_of_date")
+    if "forecast_execution_datetime_local" in normalized.columns:
+        normalized["forecast_execution_datetime_local"] = pd.to_datetime(
+            normalized["forecast_execution_datetime_local"], errors="coerce"
+        )
     return normalized
 
 
@@ -510,9 +617,13 @@ def _normalize_weather_hourly(df: pd.DataFrame) -> pd.DataFrame:
         if pjm_rows.any():
             output = output[pjm_rows].copy()
 
-    date_col = _first_present(output.columns, ("date_ept", "forecast_date_ept", "forecast_date", "date"))
+    date_col = _first_present(
+        output.columns, ("date_ept", "forecast_date_ept", "forecast_date", "date")
+    )
     hour_col = _first_present(output.columns, ("hour_ending_ept", "hour_ending"))
-    temp_col = _first_present(output.columns, ("temperature", "temp", "temperature_f", "temp_f"))
+    temp_col = _first_present(
+        output.columns, ("temperature", "temp", "temperature_f", "temp_f")
+    )
 
     if date_col is None or hour_col is None or temp_col is None:
         raise KeyError(
@@ -525,10 +636,18 @@ def _normalize_weather_hourly(df: pd.DataFrame) -> pd.DataFrame:
             output.columns,
             ("feels_like_temperature", "feels_like_temp", "heat_index"),
         ),
-        "dew_point_temp": _first_present(output.columns, ("dewpoint", "dew_point_temp", "dew_point")),
-        "wind_speed_mph": _first_present(output.columns, ("wind_speed", "wind_speed_mph")),
-        "relative_humidity": _first_present(output.columns, ("relative_humidity", "humidity")),
-        "cloud_cover_pct": _first_present(output.columns, ("cloud_cover_pct", "cloud_cover")),
+        "dew_point_temp": _first_present(
+            output.columns, ("dewpoint", "dew_point_temp", "dew_point")
+        ),
+        "wind_speed_mph": _first_present(
+            output.columns, ("wind_speed", "wind_speed_mph")
+        ),
+        "relative_humidity": _first_present(
+            output.columns, ("relative_humidity", "humidity")
+        ),
+        "cloud_cover_pct": _first_present(
+            output.columns, ("cloud_cover_pct", "cloud_cover")
+        ),
     }
 
     keep = [date_col, hour_col, temp_col]
@@ -550,7 +669,9 @@ def _normalize_weather_hourly(df: pd.DataFrame) -> pd.DataFrame:
     normalized["date"] = _coerce_date(normalized, "date")
     normalized["hour_ending"] = _coerce_hour(normalized, "hour_ending")
 
-    numeric_cols = [column for column in normalized.columns if column not in ("date", "hour_ending")]
+    numeric_cols = [
+        column for column in normalized.columns if column not in ("date", "hour_ending")
+    ]
     for column in numeric_cols:
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
 
@@ -558,7 +679,9 @@ def _normalize_weather_hourly(df: pd.DataFrame) -> pd.DataFrame:
     normalized["hour_ending"] = normalized["hour_ending"].astype(int)
 
     # WSI has one row per station-hour. Aggregate to PJM date-hour.
-    normalized = normalized.groupby(["date", "hour_ending"], as_index=False).mean(numeric_only=True)
+    normalized = normalized.groupby(["date", "hour_ending"], as_index=False).mean(
+        numeric_only=True
+    )
     return normalized
 
 
@@ -568,7 +691,9 @@ def _normalize_gas_prices_hourly(df: pd.DataFrame) -> pd.DataFrame:
     date_col = _first_present(output.columns, ("date", "gas_day", "forecast_date"))
     hour_col = _first_present(output.columns, _HOUR_CANDIDATES)
     if hour_col is None and "datetime" in output.columns:
-        output["hour_ending"] = pd.to_datetime(output["datetime"], errors="coerce").dt.hour + 1
+        output["hour_ending"] = (
+            pd.to_datetime(output["datetime"], errors="coerce").dt.hour + 1
+        )
         hour_col = "hour_ending"
 
     if date_col is None or hour_col is None:
@@ -578,7 +703,9 @@ def _normalize_gas_prices_hourly(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     hub_map = {
-        "gas_m3": _first_present(output.columns, ("gas_m3", "tetco_m3_cash", "gas_m3_price")),
+        "gas_m3": _first_present(
+            output.columns, ("gas_m3", "tetco_m3_cash", "gas_m3_price")
+        ),
         "gas_tco": _first_present(output.columns, ("gas_tco", "columbia_tco_cash")),
         "gas_tz6": _first_present(output.columns, ("gas_tz6", "transco_z6_ny_cash")),
         "gas_dom_south": _first_present(
@@ -587,7 +714,9 @@ def _normalize_gas_prices_hourly(df: pd.DataFrame) -> pd.DataFrame:
         ),
     }
 
-    keep_hub_columns = [source_col for source_col in hub_map.values() if source_col is not None]
+    keep_hub_columns = [
+        source_col for source_col in hub_map.values() if source_col is not None
+    ]
     if not keep_hub_columns:
         raise KeyError(
             "Could not normalize gas_prices_hourly; missing expected hub price columns. "
@@ -615,7 +744,9 @@ def _normalize_gas_prices_hourly(df: pd.DataFrame) -> pd.DataFrame:
 
     normalized = normalized.dropna(subset=["date", "hour_ending"])
     normalized["hour_ending"] = normalized["hour_ending"].astype(int)
-    normalized = normalized.groupby(["date", "hour_ending"], as_index=False).mean(numeric_only=True)
+    normalized = normalized.groupby(["date", "hour_ending"], as_index=False).mean(
+        numeric_only=True
+    )
     return normalized
 
 
@@ -631,7 +762,12 @@ def _normalize_meteologica_regional(df: pd.DataFrame, value_col: str) -> pd.Data
     hour_col = _first_present(output.columns, _HOUR_CANDIDATES)
     region_col = _first_present(output.columns, _REGION_CANDIDATES)
 
-    if date_col is None or hour_col is None or region_col is None or value_col not in output.columns:
+    if (
+        date_col is None
+        or hour_col is None
+        or region_col is None
+        or value_col not in output.columns
+    ):
         raise KeyError(
             f"Could not normalize meteologica frame for {value_col!r}; "
             f"columns: {list(output.columns)}"
@@ -656,6 +792,10 @@ def _normalize_meteologica_regional(df: pd.DataFrame, value_col: str) -> pd.Data
     normalized["hour_ending"] = normalized["hour_ending"].astype(int)
     if "as_of_date" in normalized.columns:
         normalized["as_of_date"] = _coerce_date(normalized, "as_of_date")
+    if "forecast_execution_datetime_local" in normalized.columns:
+        normalized["forecast_execution_datetime_local"] = pd.to_datetime(
+            normalized["forecast_execution_datetime_local"], errors="coerce"
+        )
 
     # Historical parquets carry one row per (as_of_date, region, date, he); the
     # live mart has no as_of_date and uses forecast_rank to pick the latest.
@@ -699,7 +839,12 @@ def _normalize_net_load_actual(df: pd.DataFrame) -> pd.DataFrame:
     region_col = _first_present(output.columns, _REGION_CANDIDATES)
     net_load_col = _first_present(output.columns, ("net_load_mw", "net_load"))
 
-    if date_col is None or hour_col is None or region_col is None or net_load_col is None:
+    if (
+        date_col is None
+        or hour_col is None
+        or region_col is None
+        or net_load_col is None
+    ):
         raise KeyError(
             "Could not normalize net_load_actual; expected date/hour/region/net_load_mw. "
             f"Columns: {list(output.columns)}"
@@ -726,7 +871,9 @@ def _normalize_net_load_actual(df: pd.DataFrame) -> pd.DataFrame:
             normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
     normalized = normalized.dropna(subset=["date", "hour_ending"])
     normalized["hour_ending"] = normalized["hour_ending"].astype(int)
-    return normalized.sort_values(["region", "date", "hour_ending"]).reset_index(drop=True)
+    return normalized.sort_values(["region", "date", "hour_ending"]).reset_index(
+        drop=True
+    )
 
 
 def _normalize_meteologica_net_load(df: pd.DataFrame) -> pd.DataFrame:
@@ -736,16 +883,30 @@ def _normalize_meteologica_net_load(df: pd.DataFrame) -> pd.DataFrame:
     hour_col = _first_present(output.columns, _HOUR_CANDIDATES)
     region_col = _first_present(output.columns, _REGION_CANDIDATES)
     value_cols = [
-        c for c in (
-            "forecast_load_mw", "solar_forecast", "wind_forecast", "net_load_forecast_mw",
-        ) if c in output.columns
+        c
+        for c in (
+            "forecast_load_mw",
+            "solar_forecast",
+            "wind_forecast",
+            "net_load_forecast_mw",
+        )
+        if c in output.columns
     ]
     if date_col is None or hour_col is None or region_col is None or not value_cols:
         raise KeyError(
             "Could not normalize meteologica_net_load_forecast; "
             f"columns: {list(output.columns)}"
         )
-    keep = [date_col, hour_col, region_col, *value_cols]
+    exec_datetime_cols = [
+        c
+        for c in (
+            "load_forecast_execution_datetime_local",
+            "solar_forecast_execution_datetime_local",
+            "wind_forecast_execution_datetime_local",
+        )
+        if c in output.columns
+    ]
+    keep = [date_col, hour_col, region_col, *value_cols, *exec_datetime_cols]
     if "as_of_date" in output.columns:
         keep.append("as_of_date")
     normalized = output[keep].rename(
@@ -756,6 +917,8 @@ def _normalize_meteologica_net_load(df: pd.DataFrame) -> pd.DataFrame:
     normalized["region"] = normalized["region"].astype(str)
     for col in value_cols:
         normalized[col] = pd.to_numeric(normalized[col], errors="coerce")
+    for col in exec_datetime_cols:
+        normalized[col] = pd.to_datetime(normalized[col], errors="coerce")
     normalized = normalized.dropna(subset=["date", "hour_ending"])
     normalized["hour_ending"] = normalized["hour_ending"].astype(int)
     if "as_of_date" in normalized.columns:
@@ -785,15 +948,15 @@ def _normalize_installed_capacity(df: pd.DataFrame) -> pd.DataFrame:
 
     # Map any source naming -> canonical fuel column names.
     fuel_aliases = {
-        "natural_gas_mw":   ("natural_gas_mw", "ng_mw", "ng_capacity_mw"),
-        "coal_mw":          ("coal_mw", "coal_capacity_mw"),
-        "nuclear_mw":       ("nuclear_mw", "nuclear_capacity_mw"),
-        "oil_products_mw":  ("oil_products_mw", "oil_mw", "oil_capacity_mw"),
-        "solar_mw":         ("solar_mw", "solar_capacity_mw"),
-        "onshore_wind_mw":  ("onshore_wind_mw", "onshore_wind_capacity_mw"),
+        "natural_gas_mw": ("natural_gas_mw", "ng_mw", "ng_capacity_mw"),
+        "coal_mw": ("coal_mw", "coal_capacity_mw"),
+        "nuclear_mw": ("nuclear_mw", "nuclear_capacity_mw"),
+        "oil_products_mw": ("oil_products_mw", "oil_mw", "oil_capacity_mw"),
+        "solar_mw": ("solar_mw", "solar_capacity_mw"),
+        "onshore_wind_mw": ("onshore_wind_mw", "onshore_wind_capacity_mw"),
         "offshore_wind_mw": ("offshore_wind_mw", "offshore_wind_capacity_mw"),
-        "hydro_mw":         ("hydro_mw", "hydro_capacity_mw"),
-        "battery_mw":       ("battery_mw", "battery_capacity_mw"),
+        "hydro_mw": ("hydro_mw", "hydro_capacity_mw"),
+        "battery_mw": ("battery_mw", "battery_capacity_mw"),
     }
 
     rename_map: dict[str, str] = {}
@@ -818,11 +981,13 @@ def _normalize_installed_capacity(df: pd.DataFrame) -> pd.DataFrame:
     # Prefer the dbt-computed total if present; otherwise sum the fuel cols.
     if "total_installed_capacity_mw" in normalized.columns:
         normalized["total_installed_capacity_mw"] = pd.to_numeric(
-            normalized["total_installed_capacity_mw"], errors="coerce",
+            normalized["total_installed_capacity_mw"],
+            errors="coerce",
         )
     else:
         normalized["total_installed_capacity_mw"] = normalized[fuel_columns].sum(
-            axis=1, min_count=1,
+            axis=1,
+            min_count=1,
         )
 
     keep = ["date", *fuel_columns, "total_installed_capacity_mw"]
@@ -853,11 +1018,15 @@ def _normalize_day_gen_capacity(df: pd.DataFrame) -> pd.DataFrame:
             f"Columns: {list(output.columns)}"
         )
 
-    normalized = output[[date_col, *capacity_columns]].rename(columns={date_col: "date"})
+    normalized = output[[date_col, *capacity_columns]].rename(
+        columns={date_col: "date"}
+    )
     normalized["date"] = _coerce_date(normalized, "date")
     for column in capacity_columns:
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
-    normalized = normalized.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    normalized = (
+        normalized.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    )
     return normalized
 
 
@@ -889,22 +1058,28 @@ def _normalize_pjm_dates_daily(df: pd.DataFrame) -> pd.DataFrame:
     output["date"] = _coerce_date(output, "date")
     if "day_of_week_number" in output.columns:
         output["day_of_week_number"] = pd.to_numeric(
-            output["day_of_week_number"], errors="coerce",
+            output["day_of_week_number"],
+            errors="coerce",
         ).astype("Int64")
     for flag in ("is_weekend", "is_nerc_holiday", "is_federal_holiday"):
         if flag in output.columns:
-            output[flag] = pd.to_numeric(output[flag], errors="coerce").fillna(0).astype(int)
+            output[flag] = (
+                pd.to_numeric(output[flag], errors="coerce").fillna(0).astype(int)
+            )
     if "summer_winter" in output.columns:
         output["summer_winter"] = (
             output["summer_winter"].astype("string").str.upper().fillna("")
         )
 
-    output = output.dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last")
+    output = output.dropna(subset=["date"]).drop_duplicates(
+        subset=["date"], keep="last"
+    )
     return output.sort_values("date").reset_index(drop=True)
 
 
 _NORMALIZERS = {
     "lmps_da": _normalize_lmps_da,
+    "lmps_da_sep": _normalize_lmps_da_sep,
     "lmps_rt": _normalize_lmps_rt,
     "load_rt": _normalize_load_rt,
     "load_forecast": _normalize_load_forecast,
@@ -989,6 +1164,21 @@ def load_lmps_rt(
     return _load_dataset("lmps_rt", path=path, cache_dir=cache_dir, columns=columns)
 
 
+def load_lmp_system_energy_da(
+    *,
+    path: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    """PJM DA System Energy Price (SEP) component of LMP.
+
+    Returns columns: date, hour_ending, region, lmp_system_energy_price.
+    SEP is system-wide; the parquet stores it per (hub, hour), so filter
+    to a single hub to obtain one row per (date, HE).
+    """
+    return _load_dataset("lmps_da_sep", path=path, cache_dir=cache_dir, columns=columns)
+
+
 def load_load_rt(
     *,
     path: str | Path | None = None,
@@ -1039,17 +1229,24 @@ def load_load_coalesced(
     aggregations (peak / valley / ramps) never compose forecast and RT hours
     within the same date.
 
-    Returns columns: date, hour_ending, region, load_mw, source ('forecast'|'rt').
+    Returns columns: date, hour_ending, region, load_mw,
+    forecast_execution_datetime_local, source ('forecast'|'rt').
     """
-    fcst = (
-        load_load_forecast(cache_dir=cache_dir)
-        [["date", "hour_ending", "region", "forecast_load_mw"]]
-        .rename(columns={"forecast_load_mw": "load_mw"})
-    )
+    fcst = load_load_forecast(cache_dir=cache_dir)[
+        [
+            "date",
+            "hour_ending",
+            "region",
+            "forecast_load_mw",
+            "forecast_execution_datetime_local",
+        ]
+    ].rename(columns={"forecast_load_mw": "load_mw"})
     rt = (
-        load_load_rt(cache_dir=cache_dir)
-        [["date", "hour_ending", "region", "rt_load_mw"]]
+        load_load_rt(cache_dir=cache_dir)[
+            ["date", "hour_ending", "region", "rt_load_mw"]
+        ]
         .rename(columns={"rt_load_mw": "load_mw"})
+        .assign(forecast_execution_datetime_local=pd.NaT)
     )
 
     # A (region, date) is "forecast-covered" only when all 24 HEs are present.
@@ -1085,7 +1282,9 @@ def load_outages_actual(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("outages_actual", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "outages_actual", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_outages_forecast(
@@ -1094,7 +1293,9 @@ def load_outages_forecast(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("outages_forecast", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "outages_forecast", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_outages_forecast_history(
@@ -1116,7 +1317,10 @@ def load_outages_forecast_history(
     (the dbt view computes it), so no date math is needed here.
     """
     df = _load_dataset(
-        "outages_forecast_history", path=path, cache_dir=cache_dir, columns=None,
+        "outages_forecast_history",
+        path=path,
+        cache_dir=cache_dir,
+        columns=None,
     )
     if lead_days is not None and "lead_days" in df.columns:
         df = df[df["lead_days"] == lead_days].copy()
@@ -1129,7 +1333,9 @@ def load_solar_forecast(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("solar_forecast", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "solar_forecast", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_solar_coalesced(
@@ -1153,7 +1359,8 @@ def load_solar_coalesced(
     actuals before that date) and no forecast coverage either, so they are
     naturally absent from the coalesced series.
 
-    Returns columns: date, hour_ending, solar_mw, source ('forecast'|'rt').
+    Returns columns: date, hour_ending, solar_mw,
+    forecast_execution_datetime_local, source ('forecast'|'rt').
     """
     fcst_full = load_solar_forecast(cache_dir=cache_dir)
     if "as_of_date" in fcst_full.columns:
@@ -1162,17 +1369,23 @@ def load_solar_coalesced(
             - pd.to_datetime(fcst_full["as_of_date"], errors="coerce")
         ).dt.days
         fcst_full = fcst_full[delta == 1].copy()
-    fcst = (
-        fcst_full[["date", "hour_ending", "solar_forecast"]]
-        .rename(columns={"solar_forecast": "solar_mw"})
-    )
+    fcst = fcst_full[
+        [
+            "date",
+            "hour_ending",
+            "solar_forecast",
+            "forecast_execution_datetime_local",
+        ]
+    ].rename(columns={"solar_forecast": "solar_mw"})
 
     rt_full = load_net_load_actuals(cache_dir=cache_dir)
     rt = (
-        rt_full[rt_full["region"].astype(str) == "RTO"]
-        [["date", "hour_ending", "solar_gen_mw"]]
+        rt_full[rt_full["region"].astype(str) == "RTO"][
+            ["date", "hour_ending", "solar_gen_mw"]
+        ]
         .rename(columns={"solar_gen_mw": "solar_mw"})
         .dropna(subset=["solar_mw"])
+        .assign(forecast_execution_datetime_local=pd.NaT)
     )
 
     # A date is "forecast-covered" only when all 24 HEs are present.
@@ -1196,7 +1409,9 @@ def load_wind_forecast(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("wind_forecast", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "wind_forecast", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_wind_coalesced(
@@ -1218,7 +1433,8 @@ def load_wind_coalesced(
     PJM wind forecast is system-wide (no region column) and actuals are
     filtered to RTO, so the output is RTO-only with no region column.
 
-    Returns columns: date, hour_ending, wind_mw, source ('forecast'|'rt').
+    Returns columns: date, hour_ending, wind_mw,
+    forecast_execution_datetime_local, source ('forecast'|'rt').
     """
     fcst_full = load_wind_forecast(cache_dir=cache_dir)
     if "as_of_date" in fcst_full.columns:
@@ -1227,17 +1443,23 @@ def load_wind_coalesced(
             - pd.to_datetime(fcst_full["as_of_date"], errors="coerce")
         ).dt.days
         fcst_full = fcst_full[delta == 1].copy()
-    fcst = (
-        fcst_full[["date", "hour_ending", "wind_forecast"]]
-        .rename(columns={"wind_forecast": "wind_mw"})
-    )
+    fcst = fcst_full[
+        [
+            "date",
+            "hour_ending",
+            "wind_forecast",
+            "forecast_execution_datetime_local",
+        ]
+    ].rename(columns={"wind_forecast": "wind_mw"})
 
     rt_full = load_net_load_actuals(cache_dir=cache_dir)
     rt = (
-        rt_full[rt_full["region"].astype(str) == "RTO"]
-        [["date", "hour_ending", "wind_gen_mw"]]
+        rt_full[rt_full["region"].astype(str) == "RTO"][
+            ["date", "hour_ending", "wind_gen_mw"]
+        ]
         .rename(columns={"wind_gen_mw": "wind_mw"})
         .dropna(subset=["wind_mw"])
+        .assign(forecast_execution_datetime_local=pd.NaT)
     )
 
     # A date is "forecast-covered" only when all 24 HEs are present.
@@ -1261,7 +1483,9 @@ def load_net_load_forecast(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("net_load_forecast", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "net_load_forecast", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_pjm_net_load_forecast(
@@ -1276,7 +1500,10 @@ def load_pjm_net_load_forecast(
     with as_of_date when present in the historical mart.
     """
     return _load_dataset(
-        "pjm_net_load_forecast", path=path, cache_dir=cache_dir, columns=columns,
+        "pjm_net_load_forecast",
+        path=path,
+        cache_dir=cache_dir,
+        columns=columns,
     )
 
 
@@ -1286,7 +1513,424 @@ def load_net_load_actuals(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("net_load_actual", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "net_load_actual", path=path, cache_dir=cache_dir, columns=columns
+    )
+
+
+def load_pjm_net_load_coalesced(
+    *,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+    lead_days: int | None = 1,
+    region: str = "RTO",
+) -> pd.DataFrame:
+    """Forecast-first PJM net-load — strict 24-HE coverage gate.
+
+    Superseded for new code by ``load_pjm_supply_demand_coalesced``, which
+    returns the full bundle (load + solar + wind + net_load) under the
+    same single-source-decision rule. This function remains for callers
+    that only need ``net_load_mw`` and want to skip the wider frame —
+    e.g. the streamlit Data page's per-series display, where rendering a
+    standalone net-load column alongside the standalone load/solar/wind
+    columns is the intent. Output is internally consistent on its own;
+    do NOT compose ``net_load_mw`` from this function with values from
+    ``load_solar_coalesced`` / ``load_wind_coalesced`` — the per-series
+    coalescers can disagree on forecast-vs-RT and break the identity
+    ``net_load = load - solar - wind``. Use the unified loader instead.
+
+    PJM publishes the net-load forecast for RTO only; RT actuals are
+    filtered to ``region`` (default RTO) to match. For each date, the
+    DA-cutoff forecast wins when all 24 hour_ending values are present;
+    PJM RT actuals fill every other date. Mirrors ``load_load_coalesced``
+    semantics for net-load (load minus reported solar + wind).
+
+    The historical mart carries multiple vintages per (date, hour_ending)
+    keyed by ``as_of_date``. ``lead_days=1`` (the default) selects the
+    DA-cutoff vintage (``as_of_date == date - 1``); pass ``None`` to skip
+    the vintage filter.
+
+    Returns columns: date, hour_ending, region, net_load_mw,
+    forecast_execution_datetime_local, source ('forecast'|'rt').
+    """
+    fcst_full = load_pjm_net_load_forecast(cache_dir=cache_dir)
+    fcst_full = fcst_full[fcst_full["region"].astype(str) == region].copy()
+    if lead_days is not None and "as_of_date" in fcst_full.columns:
+        delta = (
+            pd.to_datetime(fcst_full["date"], errors="coerce")
+            - pd.to_datetime(fcst_full["as_of_date"], errors="coerce")
+        ).dt.days
+        fcst_full = fcst_full[delta == lead_days].copy()
+
+    fcst = fcst_full[
+        [
+            "date",
+            "hour_ending",
+            "region",
+            "net_load_forecast_mw",
+            "load_forecast_execution_datetime_local",
+        ]
+    ].rename(
+        columns={
+            "net_load_forecast_mw": "net_load_mw",
+            "load_forecast_execution_datetime_local": "forecast_execution_datetime_local",
+        }
+    )
+    rt = (
+        load_net_load_actuals(cache_dir=cache_dir)[
+            ["date", "hour_ending", "region", "net_load_mw"]
+        ]
+        .pipe(lambda d: d[d["region"].astype(str) == region])
+        .dropna(subset=["net_load_mw"])
+        .assign(forecast_execution_datetime_local=pd.NaT)
+    )
+
+    hour_counts = fcst.groupby(["region", "date"])["hour_ending"].nunique()
+    covered_keys = hour_counts[hour_counts >= 24].index
+
+    fcst_idx = pd.MultiIndex.from_arrays([fcst["region"], fcst["date"]])
+    fcst_kept = fcst[fcst_idx.isin(covered_keys)].assign(source="forecast")
+
+    rt_idx = pd.MultiIndex.from_arrays([rt["region"], rt["date"]])
+    rt_fallback = rt[~rt_idx.isin(covered_keys)].assign(source="rt")
+
+    out = (
+        pd.concat([fcst_kept, rt_fallback], ignore_index=True)
+        .sort_values(["region", "date", "hour_ending"])
+        .reset_index(drop=True)
+    )
+    return _apply_column_filter(out, columns)
+
+
+def load_pjm_supply_demand_coalesced(
+    *,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+    region: str = "RTO",
+    lead_days: int | None = 1,
+) -> pd.DataFrame:
+    """Forecast-first hourly RTO supply-demand bundle: load + solar + wind + net_load.
+
+    Unified single-source decision per (region, date) for ALL FOUR series
+    simultaneously. A (region, date) is 'forecast' iff the DA-cutoff
+    net_load forecast has full 24-hour coverage (which — by upstream
+    construction in dbt's ``pjm_net_load_forecast_hourly_da_cutoff`` INNER
+    JOIN of the three component forecasts — implies load+solar+wind are
+    all present). Otherwise the date falls back to RT for all four.
+
+    Eliminates the cross-source mixing artifact where the per-series
+    coalescers (``load_load_coalesced``, ``load_solar_coalesced``,
+    ``load_wind_coalesced``, ``load_pjm_net_load_coalesced``) each
+    independently decide forecast-vs-RT. On dates where load+net_load fall
+    back to RT but solar+wind stay on forecast, the identity
+    ``net_load = load - solar - wind`` breaks (e.g. 2025-05-01: ~3.9 GW
+    max gap, ~932 MW mean). This unified function holds the identity by
+    construction:
+
+      - Forecast rows come from ``pjm_net_load_forecast_hourly_da_cutoff``
+        (built upstream by INNER JOIN of the three component forecasts).
+      - RT rows come from ``pjm_net_load_rt_hourly`` (built upstream by
+        LEFT JOIN of the three component RT marts).
+
+    PJM solar/wind forecasts are system-wide; net_load forecast is
+    RTO-only. ``region`` defaults to and currently only supports 'RTO' —
+    sub-zonal load (MIDATL/WEST/SOUTH) lacks matching renewable forecasts.
+    Use ``load_load_coalesced`` for sub-zonal load alone.
+
+    ``lead_days=1`` (the default) selects the DA-cutoff forecast vintage
+    (``as_of_date == forecast_date - 1``). Pass ``None`` to skip the
+    vintage filter.
+
+    Returns columns:
+        date, hour_ending, region, source ('forecast'|'rt'),
+        load_mw, solar_mw, wind_mw, net_load_mw,
+        load_forecast_execution_datetime_local,
+        solar_forecast_execution_datetime_local,
+        wind_forecast_execution_datetime_local.
+    """
+    if region != "RTO":
+        raise ValueError(
+            f"region={region!r} not supported; PJM net_load and solar/wind "
+            "forecasts are RTO-only. Use load_load_coalesced for sub-zonal load."
+        )
+
+    # ── Forecast frame: pjm_net_load_forecast already aligns all 4 components ──
+    fcst_full = load_pjm_net_load_forecast(cache_dir=cache_dir)
+    fcst_full = fcst_full[fcst_full["region"].astype(str) == region].copy()
+    if lead_days is not None and "as_of_date" in fcst_full.columns:
+        delta = (
+            pd.to_datetime(fcst_full["date"], errors="coerce")
+            - pd.to_datetime(fcst_full["as_of_date"], errors="coerce")
+        ).dt.days
+        fcst_full = fcst_full[delta == lead_days].copy()
+
+    # A (region, date) is forecast-covered only when all 24 HEs are present.
+    hour_counts = fcst_full.groupby(["region", "date"])["hour_ending"].nunique()
+    covered_keys = hour_counts[hour_counts >= 24].index
+
+    fcst_idx = pd.MultiIndex.from_arrays([fcst_full["region"], fcst_full["date"]])
+    fcst_kept = fcst_full[fcst_idx.isin(covered_keys)].copy()
+    fcst_kept = fcst_kept.rename(
+        columns={
+            "forecast_load_mw": "load_mw",
+            "solar_forecast": "solar_mw",
+            "wind_forecast": "wind_mw",
+            "net_load_forecast_mw": "net_load_mw",
+        }
+    )
+    fcst_kept["source"] = "forecast"
+
+    # ── RT frame: pjm_net_load_rt_hourly already exposes all 4 components ──
+    rt_full = load_net_load_actuals(cache_dir=cache_dir)
+    rt = (
+        rt_full[rt_full["region"].astype(str) == region]
+        .rename(
+            columns={
+                "rt_load_mw": "load_mw",
+                "solar_gen_mw": "solar_mw",
+                "wind_gen_mw": "wind_mw",
+            }
+        )
+        .copy()
+    )
+    rt_idx = pd.MultiIndex.from_arrays([rt["region"], rt["date"]])
+    rt_fallback = rt[~rt_idx.isin(covered_keys)].copy()
+    rt_fallback["source"] = "rt"
+    for c in (
+        "load_forecast_execution_datetime_local",
+        "solar_forecast_execution_datetime_local",
+        "wind_forecast_execution_datetime_local",
+    ):
+        rt_fallback[c] = pd.NaT
+
+    out_cols = [
+        "date",
+        "hour_ending",
+        "region",
+        "source",
+        "load_mw",
+        "solar_mw",
+        "wind_mw",
+        "net_load_mw",
+        "load_forecast_execution_datetime_local",
+        "solar_forecast_execution_datetime_local",
+        "wind_forecast_execution_datetime_local",
+    ]
+    # Defensive: backfill any missing output column on either side with NaT/NaN.
+    for c in out_cols:
+        if c not in fcst_kept.columns:
+            fcst_kept[c] = pd.NaT if "datetime" in c else float("nan")
+        if c not in rt_fallback.columns:
+            rt_fallback[c] = pd.NaT if "datetime" in c else float("nan")
+
+    out = (
+        pd.concat(
+            [fcst_kept[out_cols], rt_fallback[out_cols]],
+            ignore_index=True,
+        )
+        .sort_values(["region", "date", "hour_ending"])
+        .reset_index(drop=True)
+    )
+    return _apply_column_filter(out, columns)
+
+
+def load_meteologica_net_load_coalesced(
+    *,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+    lead_days: int | None = 1,
+) -> pd.DataFrame:
+    """Meteologica-first net-load — strict 24-HE coverage gate (4 regions).
+
+    Superseded for new code by ``load_meteologica_supply_demand_coalesced``,
+    which returns the full bundle (load + solar + wind + net_load) under
+    the same single-source-decision rule. This function remains for
+    callers that only need ``net_load_mw`` and want to skip the wider
+    frame — e.g. the streamlit Data page's per-series Meteologica display.
+    Output is internally consistent on its own; do NOT compose
+    ``net_load_mw`` from this function with values from
+    ``load_meteologica_solar_coalesced`` / ``load_meteologica_wind_coalesced``
+    — the per-series coalescers can disagree on forecast-vs-RT and break
+    the identity ``net_load = load - solar - wind``. Use the unified
+    loader instead.
+
+    Mirrors ``load_meteologica_load_coalesced`` but for net-load (load minus
+    reported solar + wind). Covers RTO + MIDATL/WEST/SOUTH sub-zones.
+    Meteologica DA-cutoff vintage wins per (region, date) when all 24 HEs
+    are present; PJM RT actuals (``net_load_actual``) fill every other
+    (region, date), including dates with partial Meteologica coverage and
+    pre-Meteologica history.
+
+    ``lead_days=1`` (the default) selects the DA-cutoff vintage
+    (``as_of_date == date - 1``); pass ``None`` to skip the vintage filter.
+
+    Returns columns: date, hour_ending, region, net_load_mw,
+    forecast_execution_datetime_local, source ('meteologica'|'rt').
+    """
+    fcst_full = load_meteologica_net_load_forecast(cache_dir=cache_dir)
+    if lead_days is not None and "as_of_date" in fcst_full.columns:
+        delta = (
+            pd.to_datetime(fcst_full["date"], errors="coerce")
+            - pd.to_datetime(fcst_full["as_of_date"], errors="coerce")
+        ).dt.days
+        fcst_full = fcst_full[delta == lead_days].copy()
+
+    fcst = fcst_full[
+        [
+            "date",
+            "hour_ending",
+            "region",
+            "net_load_forecast_mw",
+            "load_forecast_execution_datetime_local",
+        ]
+    ].rename(
+        columns={
+            "net_load_forecast_mw": "net_load_mw",
+            "load_forecast_execution_datetime_local": "forecast_execution_datetime_local",
+        }
+    )
+    rt = (
+        load_net_load_actuals(cache_dir=cache_dir)[
+            ["date", "hour_ending", "region", "net_load_mw"]
+        ]
+        .dropna(subset=["net_load_mw"])
+        .assign(forecast_execution_datetime_local=pd.NaT)
+    )
+
+    hour_counts = fcst.groupby(["region", "date"])["hour_ending"].nunique()
+    covered_keys = hour_counts[hour_counts >= 24].index
+
+    fcst_idx = pd.MultiIndex.from_arrays([fcst["region"], fcst["date"]])
+    fcst_kept = fcst[fcst_idx.isin(covered_keys)].assign(source="meteologica")
+
+    rt_idx = pd.MultiIndex.from_arrays([rt["region"], rt["date"]])
+    rt_fallback = rt[~rt_idx.isin(covered_keys)].assign(source="rt")
+
+    out = (
+        pd.concat([fcst_kept, rt_fallback], ignore_index=True)
+        .sort_values(["region", "date", "hour_ending"])
+        .reset_index(drop=True)
+    )
+    return _apply_column_filter(out, columns)
+
+
+def load_meteologica_supply_demand_coalesced(
+    *,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+    lead_days: int | None = 1,
+) -> pd.DataFrame:
+    """Forecast-first hourly supply-demand bundle (Meteologica): load + solar + wind + net_load.
+
+    Meteologica equivalent of ``load_pjm_supply_demand_coalesced``. Single
+    source decision per (region, date) for ALL FOUR series simultaneously.
+    A (region, date) is 'meteologica' iff the DA-cutoff Meteologica
+    net_load forecast has full 24-hour coverage (which — by upstream
+    construction in dbt's ``meteologica_pjm_net_load_forecast_hourly_da_cutoff``
+    JOIN of the three component forecasts — implies load+solar+wind are
+    all present). Otherwise the date falls back to PJM RT actuals for all
+    four. Meteologica has no RT side; ``pjm_net_load_rt_hourly`` provides
+    the unified-component RT fallback.
+
+    Eliminates the cross-source mixing artifact where the per-series
+    Meteologica coalescers (``load_meteologica_load_coalesced``,
+    ``load_meteologica_solar_coalesced``, ``load_meteologica_wind_coalesced``,
+    ``load_meteologica_net_load_coalesced``) could each independently
+    decide forecast-vs-RT, breaking the identity
+    ``net_load = load - solar - wind`` on dates with mixed coverage.
+    Both source paths preserve the identity by construction:
+
+      - Meteologica rows come from
+        ``meteologica_pjm_net_load_forecast_hourly_da_cutoff``
+        (built upstream by JOIN of the three component forecasts).
+      - RT rows come from ``pjm_net_load_rt_hourly`` (built upstream by
+        LEFT JOIN of the three component RT marts).
+
+    Meteologica covers all 4 regions (RTO + MIDATL/WEST/SOUTH); PJM RT
+    fallback also covers all 4. ``lead_days=1`` (the default) selects the
+    DA-cutoff vintage (``as_of_date == forecast_date - 1``); pass
+    ``None`` to skip the vintage filter.
+
+    Returns columns:
+        date, hour_ending, region, source ('meteologica'|'rt'),
+        load_mw, solar_mw, wind_mw, net_load_mw,
+        load_forecast_execution_datetime_local,
+        solar_forecast_execution_datetime_local,
+        wind_forecast_execution_datetime_local.
+    """
+    # ── Forecast frame: meteologica_pjm_net_load_forecast aligns all 4 components ──
+    fcst_full = load_meteologica_net_load_forecast(cache_dir=cache_dir)
+    if lead_days is not None and "as_of_date" in fcst_full.columns:
+        delta = (
+            pd.to_datetime(fcst_full["date"], errors="coerce")
+            - pd.to_datetime(fcst_full["as_of_date"], errors="coerce")
+        ).dt.days
+        fcst_full = fcst_full[delta == lead_days].copy()
+
+    # A (region, date) is forecast-covered only when all 24 HEs are present.
+    hour_counts = fcst_full.groupby(["region", "date"])["hour_ending"].nunique()
+    covered_keys = hour_counts[hour_counts >= 24].index
+
+    fcst_idx = pd.MultiIndex.from_arrays([fcst_full["region"], fcst_full["date"]])
+    fcst_kept = fcst_full[fcst_idx.isin(covered_keys)].copy()
+    fcst_kept = fcst_kept.rename(
+        columns={
+            "forecast_load_mw": "load_mw",
+            "solar_forecast": "solar_mw",
+            "wind_forecast": "wind_mw",
+            "net_load_forecast_mw": "net_load_mw",
+        }
+    )
+    fcst_kept["source"] = "meteologica"
+
+    # ── RT frame: pjm_net_load_rt_hourly already exposes all 4 components ──
+    rt_full = load_net_load_actuals(cache_dir=cache_dir)
+    rt = rt_full.rename(
+        columns={
+            "rt_load_mw": "load_mw",
+            "solar_gen_mw": "solar_mw",
+            "wind_gen_mw": "wind_mw",
+        }
+    ).copy()
+    rt_idx = pd.MultiIndex.from_arrays([rt["region"], rt["date"]])
+    rt_fallback = rt[~rt_idx.isin(covered_keys)].copy()
+    rt_fallback["source"] = "rt"
+    for c in (
+        "load_forecast_execution_datetime_local",
+        "solar_forecast_execution_datetime_local",
+        "wind_forecast_execution_datetime_local",
+    ):
+        rt_fallback[c] = pd.NaT
+
+    out_cols = [
+        "date",
+        "hour_ending",
+        "region",
+        "source",
+        "load_mw",
+        "solar_mw",
+        "wind_mw",
+        "net_load_mw",
+        "load_forecast_execution_datetime_local",
+        "solar_forecast_execution_datetime_local",
+        "wind_forecast_execution_datetime_local",
+    ]
+    # Defensive: backfill any missing output column on either side with NaT/NaN.
+    for c in out_cols:
+        if c not in fcst_kept.columns:
+            fcst_kept[c] = pd.NaT if "datetime" in c else float("nan")
+        if c not in rt_fallback.columns:
+            rt_fallback[c] = pd.NaT if "datetime" in c else float("nan")
+
+    out = (
+        pd.concat(
+            [fcst_kept[out_cols], rt_fallback[out_cols]],
+            ignore_index=True,
+        )
+        .sort_values(["region", "date", "hour_ending"])
+        .reset_index(drop=True)
+    )
+    return _apply_column_filter(out, columns)
 
 
 def load_installed_capacity(
@@ -1300,7 +1944,9 @@ def load_installed_capacity(
     Forward-projected through ~2030. Returns one row per month with
     canonical fuel column names plus total_installed_capacity_mw.
     """
-    return _load_dataset("installed_capacity", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "installed_capacity", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_day_gen_capacity(
@@ -1315,7 +1961,9 @@ def load_day_gen_capacity(
     forward query use, take the most recently published row — total_committed
     is structural (RPM-cleared, effectively flat day-to-day).
     """
-    return _load_dataset("day_gen_capacity", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "day_gen_capacity", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_pjm_dates_daily(
@@ -1330,7 +1978,9 @@ def load_pjm_dates_daily(
     is_nerc_holiday, is_federal_holiday, summer_winter, holiday_name.
     Sorted by date, deduplicated (last write wins per date).
     """
-    return _load_dataset("pjm_dates_daily", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "pjm_dates_daily", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_weather_hourly(
@@ -1339,7 +1989,9 @@ def load_weather_hourly(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("weather_hourly", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "weather_hourly", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_weather_observed_hourly(
@@ -1348,7 +2000,9 @@ def load_weather_observed_hourly(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("weather_observed_hourly", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "weather_observed_hourly", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_weather_forecast_hourly(
@@ -1357,7 +2011,9 @@ def load_weather_forecast_hourly(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("weather_forecast_hourly", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "weather_forecast_hourly", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_gas_prices_hourly(
@@ -1366,7 +2022,9 @@ def load_gas_prices_hourly(
     cache_dir: str | Path | None = None,
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
-    return _load_dataset("gas_prices_hourly", path=path, cache_dir=cache_dir, columns=columns)
+    return _load_dataset(
+        "gas_prices_hourly", path=path, cache_dir=cache_dir, columns=columns
+    )
 
 
 def load_meteologica_load_forecast(
@@ -1376,7 +2034,10 @@ def load_meteologica_load_forecast(
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     return _load_dataset(
-        "meteologica_load_forecast", path=path, cache_dir=cache_dir, columns=columns,
+        "meteologica_load_forecast",
+        path=path,
+        cache_dir=cache_dir,
+        columns=columns,
     )
 
 
@@ -1405,7 +2066,7 @@ def load_meteologica_load_coalesced(
     this for visualization; downstream model wiring is opt-in.
 
     Returns columns: date, hour_ending, region, load_mw,
-    source ('meteologica'|'rt').
+    forecast_execution_datetime_local, source ('meteologica'|'rt').
     """
     fcst_full = load_meteologica_load_forecast(cache_dir=cache_dir)
     if lead_days is not None and "as_of_date" in fcst_full.columns:
@@ -1415,14 +2076,21 @@ def load_meteologica_load_coalesced(
         ).dt.days
         fcst_full = fcst_full[delta == lead_days].copy()
 
-    fcst = (
-        fcst_full[["date", "hour_ending", "region", "forecast_load_mw"]]
-        .rename(columns={"forecast_load_mw": "load_mw"})
-    )
+    fcst = fcst_full[
+        [
+            "date",
+            "hour_ending",
+            "region",
+            "forecast_load_mw",
+            "forecast_execution_datetime_local",
+        ]
+    ].rename(columns={"forecast_load_mw": "load_mw"})
     rt = (
-        load_load_rt(cache_dir=cache_dir)
-        [["date", "hour_ending", "region", "rt_load_mw"]]
+        load_load_rt(cache_dir=cache_dir)[
+            ["date", "hour_ending", "region", "rt_load_mw"]
+        ]
         .rename(columns={"rt_load_mw": "load_mw"})
+        .assign(forecast_execution_datetime_local=pd.NaT)
     )
 
     # A (region, date) is "Meteologica-covered" only when all 24 HEs are present.
@@ -1450,7 +2118,10 @@ def load_meteologica_solar_forecast(
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     return _load_dataset(
-        "meteologica_solar_forecast", path=path, cache_dir=cache_dir, columns=columns,
+        "meteologica_solar_forecast",
+        path=path,
+        cache_dir=cache_dir,
+        columns=columns,
     )
 
 
@@ -1484,7 +2155,7 @@ def load_meteologica_solar_coalesced(
     this for visualization; downstream model wiring is opt-in.
 
     Returns columns: date, hour_ending, region, solar_mw,
-    source ('meteologica'|'rt').
+    forecast_execution_datetime_local, source ('meteologica'|'rt').
     """
     fcst_full = load_meteologica_solar_forecast(cache_dir=cache_dir)
     if lead_days is not None and "as_of_date" in fcst_full.columns:
@@ -1494,15 +2165,22 @@ def load_meteologica_solar_coalesced(
         ).dt.days
         fcst_full = fcst_full[delta == lead_days].copy()
 
-    fcst = (
-        fcst_full[["date", "hour_ending", "region", "solar_forecast"]]
-        .rename(columns={"solar_forecast": "solar_mw"})
-    )
+    fcst = fcst_full[
+        [
+            "date",
+            "hour_ending",
+            "region",
+            "solar_forecast",
+            "forecast_execution_datetime_local",
+        ]
+    ].rename(columns={"solar_forecast": "solar_mw"})
     rt = (
-        load_net_load_actuals(cache_dir=cache_dir)
-        [["date", "hour_ending", "region", "solar_gen_mw"]]
+        load_net_load_actuals(cache_dir=cache_dir)[
+            ["date", "hour_ending", "region", "solar_gen_mw"]
+        ]
         .rename(columns={"solar_gen_mw": "solar_mw"})
         .dropna(subset=["solar_mw"])
+        .assign(forecast_execution_datetime_local=pd.NaT)
     )
 
     # A (region, date) is "Meteologica-covered" only when all 24 HEs are present.
@@ -1530,7 +2208,10 @@ def load_meteologica_wind_forecast(
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     return _load_dataset(
-        "meteologica_wind_forecast", path=path, cache_dir=cache_dir, columns=columns,
+        "meteologica_wind_forecast",
+        path=path,
+        cache_dir=cache_dir,
+        columns=columns,
     )
 
 
@@ -1566,7 +2247,7 @@ def load_meteologica_wind_coalesced(
     this for visualization; downstream model wiring is opt-in.
 
     Returns columns: date, hour_ending, region, wind_mw,
-    source ('meteologica'|'rt').
+    forecast_execution_datetime_local, source ('meteologica'|'rt').
     """
     fcst_full = load_meteologica_wind_forecast(cache_dir=cache_dir)
     if lead_days is not None and "as_of_date" in fcst_full.columns:
@@ -1576,15 +2257,22 @@ def load_meteologica_wind_coalesced(
         ).dt.days
         fcst_full = fcst_full[delta == lead_days].copy()
 
-    fcst = (
-        fcst_full[["date", "hour_ending", "region", "wind_forecast"]]
-        .rename(columns={"wind_forecast": "wind_mw"})
-    )
+    fcst = fcst_full[
+        [
+            "date",
+            "hour_ending",
+            "region",
+            "wind_forecast",
+            "forecast_execution_datetime_local",
+        ]
+    ].rename(columns={"wind_forecast": "wind_mw"})
     rt = (
-        load_net_load_actuals(cache_dir=cache_dir)
-        [["date", "hour_ending", "region", "wind_gen_mw"]]
+        load_net_load_actuals(cache_dir=cache_dir)[
+            ["date", "hour_ending", "region", "wind_gen_mw"]
+        ]
         .rename(columns={"wind_gen_mw": "wind_mw"})
         .dropna(subset=["wind_mw"])
+        .assign(forecast_execution_datetime_local=pd.NaT)
     )
 
     # A (region, date) is "Meteologica-covered" only when all 24 HEs are present.
@@ -1612,5 +2300,8 @@ def load_meteologica_net_load_forecast(
     columns: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     return _load_dataset(
-        "meteologica_net_load_forecast", path=path, cache_dir=cache_dir, columns=columns,
+        "meteologica_net_load_forecast",
+        path=path,
+        cache_dir=cache_dir,
+        columns=columns,
     )
