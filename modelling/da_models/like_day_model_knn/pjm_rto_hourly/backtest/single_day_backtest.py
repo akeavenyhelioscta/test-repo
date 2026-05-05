@@ -252,6 +252,160 @@ _HL_FORECAST_LOCAL = Style.BRIGHT + Fore.RED
 _RS_LOCAL = Style.RESET_ALL
 
 
+# Shape windows — narrow, anchor-point HEs used for ramps and valley.
+_SHAPE_WINDOWS: dict[str, tuple[int, ...]] = {
+    "overnight":     (3, 4, 5),
+    "morning_peak":  (7, 8, 9),
+    "midday_valley": (12, 13, 14, 15),
+    "evening_peak":  (19, 20, 21),
+    "late":          (23, 24),
+}
+
+# Window-MAE windows — broader, capture transition zones too.
+_MAE_WINDOWS: dict[str, tuple[int, ...]] = {
+    "overnight     (HE1-6)":     tuple(range(1, 7)),
+    "morning_ramp  (HE6-9)":     (6, 7, 8, 9),
+    "midday_valley (HE10-16)":   tuple(range(10, 17)),
+    "evening_ramp  (HE16-21)":   tuple(range(16, 22)),
+    "late          (HE22-24)":   (22, 23, 24),
+}
+
+
+def _window_mean(values: list[float | None], hes: tuple[int, ...]) -> float | None:
+    vals = [values[h - 1] for h in hes if values[h - 1] is not None]
+    return (sum(vals) / len(vals)) if vals else None
+
+
+def _window_abs_err_mean(
+    forecast: list[float | None], actual: list[float | None], hes: tuple[int, ...],
+) -> float | None:
+    pairs = [
+        (forecast[h - 1], actual[h - 1])
+        for h in hes
+        if forecast[h - 1] is not None and actual[h - 1] is not None
+    ]
+    if not pairs:
+        return None
+    return sum(abs(f - a) for f, a in pairs) / len(pairs)
+
+
+def _print_shape_metrics(rows: list[dict], target_date: date) -> None:
+    """Shape-aware metrics: overnight / morning_peak / valley / evening_peak
+    means, derived morning + evening ramps, and per-window MAE.
+
+    Two tables. The first shows mean prices within shape windows + ramp
+    magnitudes per scenario, with the error vs actual in parens. The
+    second shows per-window MAE so you can see where each scenario wins
+    or loses by region of the day. Best per row marked with '*'.
+    """
+    ok = [r for r in rows if r["status"] == "ok"]
+    if not ok:
+        return
+    actual = ok[0].get("hourly_actual")
+    if actual is None or all(v is None for v in actual):
+        return
+
+    actual_means = {w: _window_mean(actual, hes) for w, hes in _SHAPE_WINDOWS.items()}
+    a_overnight = actual_means["overnight"]
+    a_morning_peak = actual_means["morning_peak"]
+    a_midday_valley = actual_means["midday_valley"]
+    a_evening_peak = actual_means["evening_peak"]
+    actual_morning_ramp = (
+        (a_morning_peak - a_overnight)
+        if (a_morning_peak is not None and a_overnight is not None) else None
+    )
+    actual_evening_ramp = (
+        (a_evening_peak - a_midday_valley)
+        if (a_evening_peak is not None and a_midday_valley is not None) else None
+    )
+
+    name_w = max(16, max(len(r["scenario_name"]) for r in ok))
+    metric_w = 28
+    cell_w = max(name_w, 16)
+
+    print("=" * (metric_w + 10 + (cell_w + 2) * len(ok)))
+    print(f"  SHAPE METRICS — {target_date}  ($/MWh, error in parens vs actual)")
+    print(f"  windows: overnight=HE3-5  morning_peak=HE7-9  midday_valley=HE12-15  evening_peak=HE19-21")
+    print("=" * (metric_w + 10 + (cell_w + 2) * len(ok)))
+
+    header = f"{'metric':<{metric_w}}  {'actual':>8}"
+    for r in ok:
+        header += f"  {r['scenario_name']:>{cell_w}}"
+    print(header)
+    print("-" * len(header))
+
+    def _fmt_value_with_err(forecast_val: float | None, actual_val: float | None) -> str:
+        if forecast_val is None or actual_val is None:
+            return f"{'n/a':>{cell_w}}"
+        delta = forecast_val - actual_val
+        return f"{forecast_val:>6.1f} ({delta:+6.1f})".rjust(cell_w)
+
+    # Window-mean rows
+    for label, key in [
+        ("overnight      (mean HE3-5)",  "overnight"),
+        ("morning_peak   (mean HE7-9)",  "morning_peak"),
+        ("midday_valley  (mean HE12-15)", "midday_valley"),
+        ("evening_peak   (mean HE19-21)", "evening_peak"),
+        ("late           (mean HE23-24)", "late"),
+    ]:
+        a = actual_means[key]
+        line = f"{label:<{metric_w}}  "
+        line += f"{a:>8.1f}" if a is not None else f"{'n/a':>8}"
+        for r in ok:
+            f = _window_mean(r.get("hourly_forecast") or [None] * 24, _SHAPE_WINDOWS[key])
+            line += f"  {_fmt_value_with_err(f, a)}"
+        print(line)
+
+    # Derived ramp rows
+    print()
+    for label, anchor_actual, peak_key, low_key in [
+        ("morning_ramp   (peak - on)",   actual_morning_ramp, "morning_peak", "overnight"),
+        ("evening_ramp   (peak - val)",  actual_evening_ramp, "evening_peak", "midday_valley"),
+    ]:
+        line = f"{label:<{metric_w}}  "
+        line += f"{anchor_actual:>8.1f}" if anchor_actual is not None else f"{'n/a':>8}"
+        for r in ok:
+            forecast = r.get("hourly_forecast") or [None] * 24
+            peak = _window_mean(forecast, _SHAPE_WINDOWS[peak_key])
+            low = _window_mean(forecast, _SHAPE_WINDOWS[low_key])
+            ramp = (peak - low) if (peak is not None and low is not None) else None
+            line += f"  {_fmt_value_with_err(ramp, anchor_actual)}"
+        print(line)
+
+    # ── Window MAE table ──────────────────────────────────────────────
+    print()
+    print("=" * (metric_w + 10 + (cell_w + 2) * len(ok)))
+    print(f"  WINDOW MAE — {target_date}  ($/MWh; best per row marked *)")
+    print("=" * (metric_w + 10 + (cell_w + 2) * len(ok)))
+    header2 = f"{'window':<{metric_w}}  {'':>8}"
+    for r in ok:
+        header2 += f"  {r['scenario_name']:>{cell_w}}"
+    print(header2)
+    print("-" * len(header2))
+
+    for label, hes in _MAE_WINDOWS.items():
+        per_scenario_mae: list[tuple[str, float | None]] = []
+        for r in ok:
+            forecast = r.get("hourly_forecast") or [None] * 24
+            per_scenario_mae.append((
+                r["scenario_name"],
+                _window_abs_err_mean(forecast, actual, hes),
+            ))
+        valid = [m for _, m in per_scenario_mae if m is not None]
+        min_mae = min(valid) if valid else None
+
+        line = f"{label:<{metric_w}}  {'':>8}"
+        for name, mae in per_scenario_mae:
+            if mae is None:
+                cell = f"{'n/a':>{cell_w}}"
+            else:
+                marker = "*" if min_mae is not None and abs(mae - min_mae) < 0.01 else " "
+                cell = f"{mae:>{cell_w - 2}.1f}{marker} ".rjust(cell_w)
+            line += f"  {cell}"
+        print(line)
+    print()
+
+
 def _print_per_scenario_detail(rows: list[dict], target_date: date) -> None:
     """One Actual / Forecast / Error block per scenario.
 
@@ -369,6 +523,7 @@ def run(
         rows.append(row)
 
     _print_comparison(rows, resolved_date, actuals_summary)
+    _print_shape_metrics(rows, resolved_date)
     _print_per_scenario_detail(rows, resolved_date)
     return rows
 
