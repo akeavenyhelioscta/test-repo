@@ -234,9 +234,9 @@ def _build_rto_load_scalar_query(
 
 RTO_LOAD_SCALAR = FeatureDomain(
     name="rto_load_scalar",
-    description="RTO load scalar at target HE. Pool: RT→forecast fallback; query: forecast→RT fallback.",
-    feature_groups={"load": ["load_mw_at_hour"]},
-    feature_group_weights={"load": 1.0},
+    description="RTO load scalar at target HE. Pool: RT->forecast fallback; query: forecast->RT fallback.",
+    feature_groups={"load_at_hour": ["load_mw_at_hour"]},
+    feature_group_weights={"load_at_hour": 3.0},
     pool_builder=_build_rto_load_scalar_pool,
     query_builder=_build_rto_load_scalar_query,
 )
@@ -247,27 +247,14 @@ RTO_LOAD_SCALAR = FeatureDomain(
 
 
 def _build_temperature_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df_obs = _safe_load(loader.load_weather_observed_hourly, cache_dir)
-    if df_obs is None or len(df_obs) == 0:
-        df_obs = _safe_load(loader.load_weather_hourly, cache_dir)
-
-    base = _empty_long(["temp_at_hour"])
-    if df_obs is not None and "temp" in df_obs.columns:
-        base = df_obs[["date", "hour_ending", "temp"]].rename(
-            columns={"temp": "temp_at_hour"}
-        )
-
-    df_fc = _safe_load(loader.load_weather_forecast_hourly, cache_dir)
-    if df_fc is not None and "temp" in df_fc.columns:
-        if len(base) == 0:
-            base = df_fc[["date", "hour_ending", "temp"]].rename(
-                columns={"temp": "temp_at_hour"}
-            )
-        else:
-            base = _fallback_fill(base, "temp_at_hour", df_fc, "temp")
-
-    if len(base) == 0:
-        return base
+    """Pool reads from the unified observed-first weather coalescer so the
+    pool's (observed | forecast) decision is centralized in
+    ``loader.load_weather_coalesced``. Mirrors the load / solar / wind
+    domains that consume their respective coalesced loaders."""
+    df = _safe_load(loader.load_weather_coalesced, cache_dir)
+    if df is None or len(df) == 0 or "temp" not in df.columns:
+        return _empty_long(["temp_at_hour"])
+    base = df[["date", "hour_ending", "temp"]].rename(columns={"temp": "temp_at_hour"})
     base["date"] = _to_date(base["date"])
     base["hour_ending"] = pd.to_numeric(base["hour_ending"], errors="coerce").astype(
         "Int64"
@@ -321,9 +308,9 @@ def _build_temperature_scalar_query(
 
 TEMPERATURE_SCALAR = FeatureDomain(
     name="temperature_scalar",
-    description="Hourly temperature scalar. Pool: observed→forecast fallback; query: forecast→observed fallback.",
-    feature_groups={"temperature": ["temp_at_hour"]},
-    feature_group_weights={"temperature": 1.0},
+    description="Hourly temperature scalar. Pool: observed->forecast fallback; query: forecast->observed fallback.",
+    feature_groups={"weather_at_hour": ["temp_at_hour"]},
+    feature_group_weights={"weather_at_hour": 2.0},
     pool_builder=_build_temperature_scalar_pool,
     query_builder=_build_temperature_scalar_query,
 )
@@ -474,7 +461,7 @@ def _build_wind_scalar_query(target_date: date, cache_dir: Path | None) -> pd.Da
 
 SOLAR_SCALAR = FeatureDomain(
     name="solar_scalar",
-    description="Hourly solar scalar. Lead-1 PJM forecast → lead-1 Meteologica → fuel_mix realized.",
+    description="Hourly solar scalar (ablation-only). Lead-1 PJM -> lead-1 Meteologica -> fuel_mix.",
     feature_groups={"solar": ["solar_at_hour"]},
     feature_group_weights={"solar": 1.0},
     pool_builder=_build_solar_scalar_pool,
@@ -483,11 +470,59 @@ SOLAR_SCALAR = FeatureDomain(
 
 WIND_SCALAR = FeatureDomain(
     name="wind_scalar",
-    description="Hourly wind scalar. Lead-1 PJM forecast → lead-1 Meteologica → fuel_mix realized.",
+    description="Hourly wind scalar (ablation-only). Lead-1 PJM -> lead-1 Meteologica -> fuel_mix.",
     feature_groups={"wind": ["wind_at_hour"]},
     feature_group_weights={"wind": 1.0},
     pool_builder=_build_wind_scalar_pool,
     query_builder=_build_wind_scalar_query,
+)
+
+
+# Combined renewable_at_hour domain - Sunny groups solar + wind under one
+# distance-metric group called "renewable_at_hour" with weight 1.5.
+
+
+def _build_renewable_at_hour_pool(cache_dir: Path | None) -> pd.DataFrame:
+    solar = _build_solar_scalar_pool(cache_dir)
+    wind = _build_wind_scalar_pool(cache_dir)
+    if len(solar) == 0 and len(wind) == 0:
+        return _empty_long(["solar_at_hour", "wind_at_hour"])
+    if len(solar) == 0:
+        wind = wind.copy()
+        wind["solar_at_hour"] = np.nan
+        return wind[["date", "hour_ending", "solar_at_hour", "wind_at_hour"]]
+    if len(wind) == 0:
+        solar = solar.copy()
+        solar["wind_at_hour"] = np.nan
+        return solar[["date", "hour_ending", "solar_at_hour", "wind_at_hour"]]
+    return solar.merge(wind, on=["date", "hour_ending"], how="outer")
+
+
+def _build_renewable_at_hour_query(
+    target_date: date, cache_dir: Path | None
+) -> pd.DataFrame:
+    solar = _build_solar_scalar_query(target_date, cache_dir)
+    wind = _build_wind_scalar_query(target_date, cache_dir)
+    if len(solar) == 0 and len(wind) == 0:
+        return _empty_long(["solar_at_hour", "wind_at_hour"])
+    if len(solar) == 0:
+        wind = wind.copy()
+        wind["solar_at_hour"] = np.nan
+        return wind[["date", "hour_ending", "solar_at_hour", "wind_at_hour"]]
+    if len(wind) == 0:
+        solar = solar.copy()
+        solar["wind_at_hour"] = np.nan
+        return solar[["date", "hour_ending", "solar_at_hour", "wind_at_hour"]]
+    return solar.merge(wind, on=["date", "hour_ending"], how="outer")
+
+
+RENEWABLE_AT_HOUR_SCALAR = FeatureDomain(
+    name="renewable_at_hour_scalar",
+    description="Combined hourly solar + wind scalars; one distance group `renewable_at_hour`.",
+    feature_groups={"renewable_at_hour": ["solar_at_hour", "wind_at_hour"]},
+    feature_group_weights={"renewable_at_hour": 1.5},
+    pool_builder=_build_renewable_at_hour_pool,
+    query_builder=_build_renewable_at_hour_query,
 )
 
 
@@ -582,9 +617,13 @@ LOAD_RAMPS_SCALAR = FeatureDomain(
     name="load_ramps_scalar",
     description="1h and 3h load ramps at target HE; wraps across day boundary via prepended prev-day load.",
     feature_groups={
-        "load_ramps": ["load_ramp_1h_at_hour", "load_ramp_3h_at_hour"],
+        "load_ramp_1h_at_hour": ["load_ramp_1h_at_hour"],
+        "load_ramp_3h_at_hour": ["load_ramp_3h_at_hour"],
     },
-    feature_group_weights={"load_ramps": 1.0},
+    feature_group_weights={
+        "load_ramp_1h_at_hour": 1.5,
+        "load_ramp_3h_at_hour": 1.5,
+    },
     pool_builder=_build_load_ramps_scalar_pool,
     query_builder=_build_load_ramps_scalar_query,
 )
@@ -647,8 +686,8 @@ RTO_NET_LOAD_SCALAR = FeatureDomain(
         "Sunny's NaN-as-zero derivation; identity does NOT hold when "
         "renewables forecasts have gaps."
     ),
-    feature_groups={"net_load": ["net_load_at_hour"]},
-    feature_group_weights={"net_load": 1.0},
+    feature_groups={"net_load_at_hour": ["net_load_at_hour"]},
+    feature_group_weights={"net_load_at_hour": 2.0},
     pool_builder=_build_rto_net_load_scalar_pool,
     query_builder=_build_rto_net_load_scalar_query,
 )
@@ -717,8 +756,8 @@ def _build_outages_scalar_query(
 OUTAGES_SCALAR = FeatureDomain(
     name="outages_scalar",
     description="Single-col daily outage total (MW). Daily-broadcast across HEs.",
-    feature_groups={"outage": ["outage_total_mw"]},
-    feature_group_weights={"outage": 1.0},
+    feature_groups={"outage_daily": ["outage_total_mw"]},
+    feature_group_weights={"outage_daily": 1.5},
     pool_builder=_build_outages_scalar_pool,
     query_builder=_build_outages_scalar_query,
 )
@@ -756,10 +795,40 @@ def _build_gas_scalar_query(target_date: date, cache_dir: Path | None) -> pd.Dat
 GAS_SCALAR = FeatureDomain(
     name="gas_scalar",
     description="Daily mean M3 cash gas across available hubs. Daily-broadcast across HEs.",
-    feature_groups={"gas": ["gas_m3_daily_avg"]},
-    feature_group_weights={"gas": 1.0},
+    feature_groups={"gas_daily": ["gas_m3_daily_avg"]},
+    feature_group_weights={"gas_daily": 2.0},
     pool_builder=_build_gas_scalar_pool,
     query_builder=_build_gas_scalar_query,
+)
+
+
+# ── calendar_scalar (no-op pool/query — cols supplied by _shared._attach_calendar) ──
+# Sunny includes calendar features (is_weekend, dow_sin, dow_cos) in the
+# distance metric and turns the hard DOW/weekend filters OFF; the empirical
+# justification is in his configs.py docstring (no-filter beats DOW filter
+# on MAE / coverage / pinball over the 2025-04 to 2025-05 window). The
+# pool/query builders are no-ops because _shared.py already attaches all
+# five calendar cols to every long-format row; this domain only declares
+# the distance group + weight.
+
+
+def _build_calendar_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    return _empty_daily([])
+
+
+def _build_calendar_scalar_query(
+    target_date: date, cache_dir: Path | None
+) -> pd.DataFrame:
+    return pd.DataFrame([{"date": target_date}])
+
+
+CALENDAR_SCALAR = FeatureDomain(
+    name="calendar_scalar",
+    description="Calendar features (is_weekend, dow_sin, dow_cos) as distance group. Cols come from _shared._attach_calendar.",
+    feature_groups={"calendar": ["is_weekend", "dow_sin", "dow_cos"]},
+    feature_group_weights={"calendar": 1.0},
+    pool_builder=_build_calendar_scalar_pool,
+    query_builder=_build_calendar_scalar_query,
 )
 
 
@@ -771,17 +840,21 @@ DOMAIN_REGISTRY: dict[str, FeatureDomain] = {
     TEMPERATURE_SCALAR.name: TEMPERATURE_SCALAR,
     SOLAR_SCALAR.name: SOLAR_SCALAR,
     WIND_SCALAR.name: WIND_SCALAR,
+    RENEWABLE_AT_HOUR_SCALAR.name: RENEWABLE_AT_HOUR_SCALAR,
     LOAD_RAMPS_SCALAR.name: LOAD_RAMPS_SCALAR,
     RTO_NET_LOAD_SCALAR.name: RTO_NET_LOAD_SCALAR,
     OUTAGES_SCALAR.name: OUTAGES_SCALAR,
     GAS_SCALAR.name: GAS_SCALAR,
+    CALENDAR_SCALAR.name: CALENDAR_SCALAR,
 }
 
 
 # Daily-broadcast domains have no hour_ending column in their output;
 # _shared.py uses this set to decide how to merge the domain's frame.
+# CALENDAR_SCALAR is daily-broadcast: its (no-op) builders return only
+# date-keyed frames; the actual cols are filled by _shared._attach_calendar.
 DAILY_BROADCAST_DOMAINS: frozenset[str] = frozenset(
-    {OUTAGES_SCALAR.name, GAS_SCALAR.name}
+    {OUTAGES_SCALAR.name, GAS_SCALAR.name, CALENDAR_SCALAR.name}
 )
 
 

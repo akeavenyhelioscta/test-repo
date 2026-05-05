@@ -2016,6 +2016,69 @@ def load_weather_forecast_hourly(
     )
 
 
+def load_weather_coalesced(
+    *,
+    cache_dir: str | Path | None = None,
+    columns: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    """Observed-first hourly RTO weather — the unified series models should consume.
+
+    For each date, the WSI observed record wins when the historical parquet
+    has all 24 hour_ending values; the latest forecast vintage fills every
+    other date — including future dates and any partial-coverage gaps in
+    history. Mirrors the strict 24-HE rule in ``load_solar_coalesced`` /
+    ``load_load_coalesced`` so daily aggregations never compose observed
+    and forecast hours within the same date.
+
+    Both parquets are RTO-wide (no region column on either side), so the
+    output carries no region column.
+
+    Forecast priority is reversed relative to the load / solar / wind
+    coalescers: weather observed actuals ARE the ground truth (vs. RT
+    actuals which lag the day-ahead decision), so observed-first is the
+    natural rule. Live-forecast query code that needs forecast-first
+    behavior for a future ``target_date`` should keep calling
+    ``load_weather_forecast_hourly`` directly.
+
+    ``relative_humidity`` exists on observed but not on the forecast
+    parquet, so it's dropped from the coalesced output (matches the
+    "carry only cols both sides have" convention used by the other
+    coalescers).
+
+    Returns columns: date, hour_ending, temp, feels_like_temp,
+    dew_point_temp, wind_speed_mph, cloud_cover_pct,
+    source ('observed'|'forecast').
+    """
+    keep_cols = [
+        "date",
+        "hour_ending",
+        "temp",
+        "feels_like_temp",
+        "dew_point_temp",
+        "wind_speed_mph",
+        "cloud_cover_pct",
+    ]
+    obs_full = load_weather_observed_hourly(cache_dir=cache_dir)
+    obs = obs_full[[c for c in keep_cols if c in obs_full.columns]].copy()
+
+    fcst_full = load_weather_forecast_hourly(cache_dir=cache_dir)
+    fcst = fcst_full[[c for c in keep_cols if c in fcst_full.columns]].copy()
+
+    # A date is "observed-covered" only when all 24 HEs are present.
+    hour_counts = obs.groupby("date")["hour_ending"].nunique()
+    covered_dates = hour_counts[hour_counts >= 24].index
+
+    obs_kept = obs[obs["date"].isin(covered_dates)].assign(source="observed")
+    fcst_fallback = fcst[~fcst["date"].isin(covered_dates)].assign(source="forecast")
+
+    out = (
+        pd.concat([obs_kept, fcst_fallback], ignore_index=True)
+        .sort_values(["date", "hour_ending"])
+        .reset_index(drop=True)
+    )
+    return _apply_column_filter(out, columns)
+
+
 def load_gas_prices_hourly(
     *,
     path: str | Path | None = None,

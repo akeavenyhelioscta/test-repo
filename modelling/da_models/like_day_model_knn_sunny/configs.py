@@ -32,16 +32,25 @@ LOAD_FORECAST_PARQUETS: list[str] = ["pjm_load_forecast_hourly_da_cutoff.parquet
 # ── Forecast defaults ──────────────────────────────────────────────────
 DEFAULT_TARGET_DATE: date = date.today() + timedelta(days=1)
 DEFAULT_N_ANALOGS: int = 20
-MIN_POOL_SIZE: int = 50
+MIN_POOL_SIZE: int = (
+    30  # smaller than daily because per-hour pool is naturally thinner (matches Sunny)
+)
 SEASON_WINDOW_DAYS: int = 60
 
 # ── Calendar / day-type pre-filtering ──────────────────────────────────
 # Sunny's filter ladder uses *exact* day-of-week match (not DOW groups)
 # plus an ``is_weekend`` fallback. Numbering convention is Sun=0..Sat=6
 # to match ``calendar.compute_sunny_calendar_row``.
-FILTER_SAME_DOW_GROUP: bool = True
+#
+# Both hard calendar filters default OFF: the calendar feature group
+# (dow_sin, dow_cos, is_weekend) keeps DOW similarity as a soft signal
+# in the distance metric. Per Sunny's empirical note, no-filter beats
+# both exact-DOW and weekend-group filters on every metric (MAE, bias,
+# coverage, pinball) over the 2025-04 to 2025-05 window — spike-day
+# analogs need to be reachable across DOWs.
+FILTER_SAME_DOW_GROUP: bool = False
 FILTER_SAME_WEEKEND_GROUP: bool = False
-FILTER_SAME_WEEKEND_GROUP_FOR_WEEKENDS: bool = True
+FILTER_SAME_WEEKEND_GROUP_FOR_WEEKENDS: bool = False
 FILTER_EXCLUDE_HOLIDAYS: bool = True
 EXCLUDE_DATES: list[str] = []  # add YYYY-MM-DD strings to drop from the pool
 
@@ -49,7 +58,7 @@ EXCLUDE_DATES: list[str] = []  # add YYYY-MM-DD strings to drop from the pool
 # Days-based and applied BEFORE the top-N selection — changes which
 # analogs are picked, not just how they blend. Faithful to Sunny's
 # original implementation; do not migrate to exponential half-life here.
-RECENCY_HALF_LIFE_DAYS: float = 365.0
+RECENCY_HALF_LIFE_DAYS: float = 730.0  # ~2y, matches Sunny
 
 # Optional hard age cap (mirrors yours). None = no cap.
 MAX_AGE_YEARS: int | None = None
@@ -139,41 +148,44 @@ class ModelSpec:
 PJM_RTO_HOURLY_SUNNY_SPEC = ModelSpec(
     name="pjm_rto_hourly_sunny",
     description=(
-        "Scalar per-HE features (load, temp, solar, wind) + load ramps; "
-        "daily-broadcast outage + gas. Sum-Euclidean over z-scored dims."
+        "Scalar per-HE features (load, temp, renewable, ramps, net_load) "
+        "+ daily-broadcast outage / gas / calendar. Sum-Euclidean over "
+        "z-scored dims; weights mirror Sunny's FEATURE_GROUP_WEIGHTS."
     ),
     match_unit="hour",
     domains=(
         "rto_load_scalar",
-        "temperature_scalar",
-        "solar_scalar",
-        "wind_scalar",
         "load_ramps_scalar",
+        "temperature_scalar",
+        "renewable_at_hour_scalar",
+        "rto_net_load_scalar",
         "outages_scalar",
         "gas_scalar",
+        "calendar_scalar",
     ),
 )
 
-# Same as above plus net_load_at_hour (computed faithfully as
-# load - solar.fillna(0) - wind.fillna(0) — breaks the identity when
-# renewables forecasts have gaps, by design for fidelity to Sunny's code).
+# Ablation variant: solar and wind as separate distance groups instead
+# of the combined renewable_at_hour. Useful for isolating which of the
+# two renewables carries more signal.
 PJM_RTO_HOURLY_SUNNY_FULL_SPEC = ModelSpec(
     name="pjm_rto_hourly_sunny_full",
     description=(
-        "All scalar features + net_load_at_hour (faithful to Sunny's "
-        "load - solar.fillna(0) - wind.fillna(0) derivation). For "
-        "ablation experiments alongside the component triple."
+        "Ablation variant: solar and wind as separate distance groups "
+        "(instead of combined renewable_at_hour). All other groups match "
+        "the default sunny spec."
     ),
     match_unit="hour",
     domains=(
         "rto_load_scalar",
+        "load_ramps_scalar",
         "temperature_scalar",
         "solar_scalar",
         "wind_scalar",
         "rto_net_load_scalar",
-        "load_ramps_scalar",
         "outages_scalar",
         "gas_scalar",
+        "calendar_scalar",
     ),
 )
 

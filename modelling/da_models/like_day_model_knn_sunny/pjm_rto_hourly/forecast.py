@@ -35,13 +35,149 @@ logger = logging.getLogger(__name__)
 HOURS: tuple[int, ...] = tuple(range(1, 25))
 
 
-def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+    """Weight-aware quantile via cumulative-weight interpolation."""
     idx = np.argsort(values)
     v = values[idx]
     w = weights[idx]
     cdf = np.cumsum(w)
     cdf = cdf / cdf[-1]
     return float(np.interp(q, cdf, v))
+
+
+_weighted_quantile = weighted_quantile  # backward-compat alias for internal callers
+
+
+def hourly_forecast_from_hour_analogs(
+    analogs: pd.DataFrame,
+    quantiles: list[float],
+) -> pd.DataFrame:
+    """Per-HE point forecast + quantiles from the engine's analog table.
+
+    Expects ``analogs`` columns: ``hour_ending, weight, lmp``. Produces
+    one row per HE with ``point_forecast`` and ``q_{q:.2f}`` columns.
+    Weights are renormalized within each HE before averaging — matches
+    ``run_forecast`` internals and the sibling wide-pool helper.
+    """
+    if len(analogs) == 0 or not {"hour_ending", "weight", "lmp"}.issubset(
+        analogs.columns
+    ):
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for h in HOURS:
+        sub = analogs[analogs["hour_ending"] == h].dropna(subset=["lmp"])
+        if len(sub) == 0:
+            continue
+        values = sub["lmp"].to_numpy(dtype=float)
+        w = sub["weight"].to_numpy(dtype=float)
+        if w.sum() <= 0:
+            continue
+        w = w / w.sum()
+        row = {"hour_ending": h, "point_forecast": float(np.average(values, weights=w))}
+        for q in quantiles:
+            row[f"q_{q:.2f}"] = weighted_quantile(values, w, q)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def aggregate_quantile_bands_from_analogs(
+    analogs: pd.DataFrame,
+    quantiles: list[float],
+    hour_groups: dict[str, list[int]] | None = None,
+    n_draws: int = 2000,
+    seed: int = 7,
+) -> dict[str, dict[float, float]]:
+    """MC joint quantile bands for OnPeak/OffPeak/Flat aggregates.
+
+    Convenience wrapper around ``_aggregate_quantile_bands`` that takes
+    the analogs DataFrame directly so callers don't have to reshape.
+    """
+    if hour_groups is None:
+        hour_groups = {
+            "OnPeak": list(configs.ONPEAK_HOURS),
+            "OffPeak": list(configs.OFFPEAK_HOURS),
+            "Flat": list(HOURS),
+        }
+    per_hour: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for h in HOURS:
+        sub = analogs[analogs["hour_ending"] == h].dropna(subset=["lmp"])
+        if len(sub) == 0:
+            continue
+        vals = sub["lmp"].to_numpy(dtype=float)
+        w = sub["weight"].to_numpy(dtype=float)
+        if w.sum() <= 0:
+            continue
+        w = w / w.sum()
+        per_hour[h] = (vals, w)
+    return _aggregate_quantile_bands(per_hour, hour_groups, quantiles, n_draws, seed)
+
+
+def build_quantiles_table(
+    target_date: date,
+    df_forecast: pd.DataFrame,
+    display_quantiles: list[float] | tuple[float, ...] = (
+        0.25,
+        0.375,
+        0.50,
+        0.625,
+        0.75,
+    ),
+    analogs: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Wide quantile-bands table — P-rows + Forecast row inserted between P50 and the next-higher band.
+
+    Mirrors the sibling wide-pool ``build_quantiles_table`` shape so the
+    terminal report is visually identical. When ``analogs`` is provided,
+    OnPeak/OffPeak/Flat summary cells are overridden by the MC joint
+    bands (Sunny's algorithmic improvement); otherwise the naive
+    per-hour-quantile mean is used.
+    """
+    cols = ["Date", "Type"] + [f"HE{h}" for h in HOURS] + ["OnPeak", "OffPeak", "Flat"]
+    if len(df_forecast) == 0:
+        return pd.DataFrame(columns=cols)
+
+    rows: list[dict] = []
+    for q in sorted(display_quantiles):
+        col = f"q_{q:.2f}"
+        if col not in df_forecast.columns:
+            continue
+        label = _quantile_label(q)
+        row: dict = {"Date": target_date, "Type": label}
+        for _, r in df_forecast.iterrows():
+            row[f"HE{int(r['hour_ending'])}"] = (
+                float(r[col]) if pd.notna(r[col]) else None
+            )
+        rows.append(_summarize(row))
+
+    forecast_row: dict = {"Date": target_date, "Type": "Forecast"}
+    for _, r in df_forecast.iterrows():
+        forecast_row[f"HE{int(r['hour_ending'])}"] = (
+            float(r["point_forecast"]) if pd.notna(r.get("point_forecast")) else None
+        )
+    forecast_row = _summarize(forecast_row)
+
+    insert_at = next(
+        (i for i, row in enumerate(rows) if row["Type"] == "P50"),
+        len(rows) // 2,
+    )
+    rows.insert(insert_at + 1, forecast_row)
+
+    if analogs is not None and len(analogs) > 0:
+        bands = aggregate_quantile_bands_from_analogs(analogs, list(display_quantiles))
+        for row in rows:
+            if row["Type"] == "Forecast":
+                continue
+            try:
+                q_for_row = float(row["Type"][1:]) / 100.0
+            except (TypeError, ValueError):
+                continue
+            for label in ("OnPeak", "OffPeak", "Flat"):
+                v = bands.get(label, {}).get(q_for_row)
+                if v is not None:
+                    row[label] = v
+
+    return pd.DataFrame(rows, columns=cols)
 
 
 def _summarize(row: dict) -> dict:

@@ -194,10 +194,15 @@ def build_pool_from_spec(
     pool = feat.merge(lmp_long, on=["date", "hour_ending"], how="left")
 
     feature_cols = all_feature_cols(spec.domains)
-    keep_cols = ["date", "hour_ending"] + feature_cols + CALENDAR_COLS + ["lmp"]
+    # Calendar cols may appear in both feature_cols (when calendar_scalar is in
+    # the spec) and CALENDAR_COLS (always attached for the filter ladder).
+    # Dedup preserves order from feature_cols.
+    extra_cal = [c for c in CALENDAR_COLS if c not in feature_cols]
+    keep_cols = ["date", "hour_ending"] + feature_cols + extra_cal + ["lmp"]
     for c in keep_cols:
         if c not in pool.columns:
             pool[c] = np.nan
+    pool = pool.loc[:, ~pool.columns.duplicated()]
     pool = pool[keep_cols]
     pool = pool.sort_values(["date", "hour_ending"]).reset_index(drop=True)
 
@@ -274,9 +279,11 @@ def build_query_row_from_spec(
         base[k] = v
 
     feature_cols = all_feature_cols(spec.domains)
-    keep_cols = ["date", "hour_ending"] + feature_cols + CALENDAR_COLS
+    extra_cal = [c for c in CALENDAR_COLS if c not in feature_cols]
+    keep_cols = ["date", "hour_ending"] + feature_cols + extra_cal
     for c in keep_cols:
         if c not in base.columns:
             base[c] = np.nan
+    base = base.loc[:, ~base.columns.duplicated()]
     out = base[keep_cols].sort_values("hour_ending").reset_index(drop=True)
     return out

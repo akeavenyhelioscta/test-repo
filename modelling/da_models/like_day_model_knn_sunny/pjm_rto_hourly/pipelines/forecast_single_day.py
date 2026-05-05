@@ -1,16 +1,14 @@
-"""Single-day pjm_rto_hourly forecast (Sunny variant) — terminal output.
+"""Single-day pjm_rto_hourly forecast (Sunny variant) - terminal output.
 
-Mirrors the printed output of Sunny's original
-``C:/OneDrive/HELIOSCTA/daily_fundies/pjm_dashboard_handoff/forecast.py``
-``__main__`` block, which runs ``run_forecast()`` for tomorrow and prints
-``result["output_table"]``. Adds a configuration header and the
-quantile-bands table on top — both are already in the result dict, so
-exposing them is free.
+Mirrors the print layout of
+``like_day_model_knn/pjm_rto_hourly/pipelines/forecast_single_day.py`` so
+a side-by-side run produces visually-comparable terminal output:
+FORECAST CONFIGURATION, POOL SUMMARY, LIKE-DAY ANALOGS, DA LMP LIKE-DAY
+FORECAST (with metrics), Quantile Bands.
 
-``run()`` returns the full result dict (``output_table``,
-``quantiles_table``, ``analogs``, ``target_features_by_hour``, ...) for
-programmatic / notebook callers and prints to stdout. Tunable defaults
-live as module-level constants.
+``run()`` returns the dict from ``forecast.run_forecast`` augmented with
+``df_forecast`` (per-HE point + quantile cols) and ``metrics`` (when
+actuals are present). Tunable defaults live as module-level constants.
 
 Usage::
 
@@ -28,65 +26,66 @@ _MODELLING_ROOT = Path(__file__).resolve().parents[4]
 if str(_MODELLING_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODELLING_ROOT))
 
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from da_models.like_day_model_knn_sunny import configs  # noqa: E402
-from da_models.like_day_model_knn_sunny.pjm_rto_hourly import forecast  # noqa: E402
+from da_models.like_day_model_knn_sunny.pjm_rto_hourly import (  # noqa: E402
+    forecast,
+    metrics as metrics_mod,
+    printers,
+)
+from da_models.like_day_model_knn_sunny.pjm_rto_hourly.builder import (  # noqa: E402
+    build_pool,
+)
 
 
-# ── Defaults (edit here instead of using CLI flags) ────────────────────
+# ── Defaults ──────────────────────────────────────────────────────────
 TARGET_DATE: date | None = None  # None -> tomorrow
 MODEL_NAME: str = configs.PJM_RTO_HOURLY_SUNNY_SPEC.name
 N_ANALOGS: int | None = None  # None -> configs.DEFAULT_N_ANALOGS
-SEASON_WINDOW_DAYS: int | None = None  # None -> configs.SEASON_WINDOW_DAYS
-MIN_POOL_SIZE: int | None = None  # None -> configs.MIN_POOL_SIZE
+SEASON_WINDOW_DAYS: int | None = None
+MIN_POOL_SIZE: int | None = None
 LABEL_SOURCE: str = configs.LABEL_SOURCE
-RECENCY_HALF_LIFE_DAYS: float | None = None  # None -> configs.RECENCY_HALF_LIFE_DAYS
+RECENCY_HALF_LIFE_DAYS: float | None = None
 
-DEFAULT_QUANTILES: tuple[float, ...] = (0.10, 0.25, 0.50, 0.75, 0.90)
+# Quantiles for the printed bands table (P25..P75) AND the wider levels
+# (P10/P90, P05/P95, P01/P99) that evaluate_forecast uses for 80/90/98%
+# prediction-interval coverage. Mirrors the sibling wide pipeline.
+DEFAULT_QUANTILES: tuple[float, ...] = (
+    0.01,
+    0.05,
+    0.10,
+    0.25,
+    0.375,
+    0.50,
+    0.625,
+    0.75,
+    0.90,
+    0.95,
+    0.99,
+)
+DISPLAY_QUANTILES: tuple[float, ...] = (0.25, 0.375, 0.50, 0.625, 0.75)
 
 
 def _resolve_target_date(target_date: date | None) -> date:
     return target_date if target_date is not None else date.today() + timedelta(days=1)
 
 
-def _print_config(
-    cfg: configs.KnnModelConfig, target_date: date, day_type: str
-) -> None:
-    print("=" * 80)
-    print("  pjm_rto_hourly_sunny  ::  single-day forecast")
-    print("=" * 80)
-    print(f"  target_date             {target_date}  ({day_type})")
-    print(f"  model                   {cfg.model_name}")
-    print(f"  hub                     {cfg.hub}")
-    print(f"  label_source            {cfg.label_source}")
-    print(f"  n_analogs               {cfg.n_analogs}")
-    print(f"  season_window_days      {cfg.season_window_days}")
-    print(f"  min_pool_size           {cfg.min_pool_size}")
-    print(f"  recency_half_life_days  {cfg.recency_half_life_days}")
-    print(f"  same_dow_group          {cfg.same_dow_group}")
-    print(
-        f"  same_weekend_group      {cfg.same_weekend_group} "
-        f"(weekends_only={cfg.same_weekend_group_for_weekends})"
-    )
-    print(f"  exclude_holidays        {cfg.exclude_holidays}")
-    print()
-
-
-def _print_forecast(output_table: pd.DataFrame) -> None:
-    print("-" * 80)
-    print("  DA LMP LIKE-DAY FORECAST  ($/MWh)")
-    print("-" * 80)
-    print(output_table.to_string(index=False, float_format=lambda v: f"{v:>8.2f}"))
-    print()
-
-
-def _print_quantiles(quantiles_table: pd.DataFrame) -> None:
-    print("-" * 80)
-    print("  QUANTILE BANDS  (per-hour weighted; OnPeak/OffPeak/Flat from MC joint)")
-    print("-" * 80)
-    print(quantiles_table.to_string(index=False, float_format=lambda v: f"{v:>8.2f}"))
-    print()
+def _naive_last_week(pool: pd.DataFrame, target_date: date) -> np.ndarray | None:
+    """Naive baseline: same-day-last-week DA LMP profile (24 hours)."""
+    last_week = target_date - timedelta(days=7)
+    sub = pool[pool["date"] == last_week]
+    if len(sub) == 0:
+        return None
+    by_he: dict[int, float] = {}
+    for _, r in sub.iterrows():
+        v = r.get("lmp")
+        if pd.notna(v):
+            by_he[int(r["hour_ending"])] = float(v)
+    if len(by_he) < 12:
+        return None
+    return np.array([by_he.get(h, np.nan) for h in range(1, 25)], dtype=float)
 
 
 def run(
@@ -98,18 +97,21 @@ def run(
     label_source: str = LABEL_SOURCE,
     recency_half_life_days: float | None = RECENCY_HALF_LIFE_DAYS,
     quantiles: tuple[float, ...] | list[float] | None = None,
+    display_quantiles: tuple[float, ...] | list[float] | None = None,
     pool: pd.DataFrame | None = None,
     quiet: bool = False,
+    y_naive_override: np.ndarray | None = None,
 ) -> dict:
-    """Run the Sunny single-day forecast and print the report.
+    """Run the Sunny single-day forecast and print the five-section report.
 
-    Returns the same dict as ``forecast.run_forecast``: ``output_table``,
-    ``quantiles_table``, ``analogs``, ``target_features_by_hour``,
-    ``forecast_date``, ``reference_date``, ``has_actuals``,
-    ``n_analogs_used``, ``scenario``, ``feature_weights``, ``day_type``.
+    Returns the dict from ``forecast.run_forecast`` plus ``df_forecast``
+    (per-HE point + quantile cols) and ``metrics`` (when actuals
+    available; empty dict otherwise).
 
-    ``pool`` — pre-built pool to skip the ~5-10s build (notebook reuse).
-    ``quiet`` — suppress prints, still return the dict.
+    ``pool`` - pre-built pool to skip the ~5-10s build (notebook reuse).
+    ``quiet`` - suppress prints, still return the dict.
+    ``y_naive_override`` - length-24 array to use as the rMAE
+    denominator instead of the default same-day-last-week persistence.
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -124,8 +126,11 @@ def run(
 
     resolved_date = _resolve_target_date(target_date)
     quantiles_list = list(quantiles if quantiles is not None else DEFAULT_QUANTILES)
+    display_q = list(
+        display_quantiles if display_quantiles is not None else DISPLAY_QUANTILES
+    )
 
-    cfg = configs.KnnModelConfig(
+    base_cfg = configs.KnnModelConfig(
         forecast_date=str(resolved_date),
         model_name=model_name,
         n_analogs=configs.DEFAULT_N_ANALOGS if n_analogs is None else int(n_analogs),
@@ -145,21 +150,84 @@ def run(
         label_source=label_source,
         quantiles=quantiles_list,
     )
+    resolved_cfg, day_type = base_cfg.with_day_type_overrides(resolved_date)
+    spec = resolved_cfg.resolved_spec()
+
+    if pool is None:
+        pool = build_pool(
+            hub=resolved_cfg.hub,
+            label_source=resolved_cfg.label_source,
+            cache_dir=configs.CACHE_DIR,
+            spec=spec,
+        )
 
     result = forecast.run_forecast(
         target_date=resolved_date,
-        config=cfg,
+        config=base_cfg,
         cache_dir=configs.CACHE_DIR,
         pool=pool,
     )
 
-    if not quiet:
-        resolved_cfg, day_type = cfg.with_day_type_overrides(resolved_date)
-        _print_config(resolved_cfg, resolved_date, day_type)
-        _print_forecast(result["output_table"])
-        _print_quantiles(result["quantiles_table"])
+    analogs = result["analogs"]
+    df_forecast = forecast.hourly_forecast_from_hour_analogs(analogs, quantiles_list)
+    quantiles_table = forecast.build_quantiles_table(
+        resolved_date, df_forecast, display_q, analogs=analogs
+    )
 
-    return result
+    metrics: dict = {}
+    if result["has_actuals"] and len(df_forecast) > 0:
+        actuals_long = pool[pool["date"] == resolved_date]
+        actuals_by_he = {
+            int(r["hour_ending"]): float(r["lmp"])
+            for _, r in actuals_long.iterrows()
+            if pd.notna(r.get("lmp"))
+        }
+        merged = df_forecast.copy()
+        merged["actual_lmp"] = merged["hour_ending"].map(actuals_by_he)
+        merged = merged.dropna(subset=["actual_lmp"])
+        if len(merged) > 0:
+            y_true = merged["actual_lmp"].to_numpy(dtype=float)
+            y_naive = None
+            naive_full = (
+                y_naive_override
+                if y_naive_override is not None
+                else _naive_last_week(pool, resolved_date)
+            )
+            if naive_full is not None:
+                y_naive = naive_full[merged["hour_ending"].astype(int).values - 1]
+            metrics = metrics_mod.evaluate_forecast(
+                y_true, merged, quantiles_list, y_naive=y_naive
+            )
+
+    if not quiet:
+        # Need a query frame for the analog-features printer's per-HE z sub-strips.
+        from da_models.like_day_model_knn_sunny.pjm_rto_hourly.builder import (
+            build_query_row,
+        )
+
+        query = build_query_row(
+            target_date=resolved_date,
+            cache_dir=configs.CACHE_DIR,
+            spec=spec,
+        )
+
+        printers.print_config(resolved_cfg, spec, resolved_date, day_type)
+        printers.print_pool_summary(
+            pool, analogs, resolved_cfg, resolved_date, day_type
+        )
+        printers.print_analog_features(
+            analogs, pool, query, resolved_date, resolved_cfg.hub
+        )
+        printers.print_forecast(result["output_table"], metrics if metrics else None)
+        printers.print_quantiles(quantiles_table)
+
+    out = dict(result)
+    out["df_forecast"] = df_forecast
+    out["quantiles_table"] = quantiles_table
+    out["metrics"] = metrics
+    out["day_type"] = day_type
+    out["n_pool"] = len(pool)
+    return out
 
 
 if __name__ == "__main__":
