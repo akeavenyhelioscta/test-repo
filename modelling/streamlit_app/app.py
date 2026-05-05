@@ -9,6 +9,7 @@ Run from ``modelling/streamlit_app``::
 
     streamlit run app.py
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,23 +35,49 @@ home = st.Page(
     default=True,
 )
 
+_MODELLING_PAGES = _PAGES_DIR / "modelling"
 _FUNDIES_PAGES = _PAGES_DIR / "fundies"
+
+model_pages = [
+    st.Page(_MODELLING_PAGES / "Data.py", title="Data", icon=":material/database:"),
+]
 
 fundies_pages = [
     # Disabled — re-enable by uncommenting.
     # st.Page(_FUNDIES_PAGES / "Fundies_DA_RT_Settles.py",        title="DA vs RT LMP",         icon=":material/show_chart:"),
-    st.Page(_FUNDIES_PAGES / "Fundies_Outages.py",              title="Outages",              icon=":material/build:"),
-    st.Page(_FUNDIES_PAGES / "Fundies_Fuel_Mix.py",             title="Fuel Mix",             icon=":material/bolt:"),
-    st.Page(_FUNDIES_PAGES / "Fundies_PJM_Net_Load.py",         title="PJM Net Load",         icon=":material/insights:"),
-    st.Page(_FUNDIES_PAGES / "Fundies_PJM_Net_Load_Compare.py", title="PJM Compare Two Days", icon=":material/compare_arrows:"),
-    st.Page(_FUNDIES_PAGES / "Fundies_Meteologica.py",          title="Meteologica",          icon=":material/cloud:"),
-    st.Page(_FUNDIES_PAGES / "Fundies_Meteologica_Compare.py",  title="Meteo Compare",        icon=":material/compare_arrows:"),
+    st.Page(
+        _FUNDIES_PAGES / "Fundies_Outages.py", title="Outages", icon=":material/build:"
+    ),
+    st.Page(
+        _FUNDIES_PAGES / "Fundies_Fuel_Mix.py", title="Fuel Mix", icon=":material/bolt:"
+    ),
+    st.Page(
+        _FUNDIES_PAGES / "Fundies_PJM_Net_Load.py",
+        title="PJM Net Load",
+        icon=":material/insights:",
+    ),
+    st.Page(
+        _FUNDIES_PAGES / "Fundies_PJM_Net_Load_Compare.py",
+        title="PJM Compare Two Days",
+        icon=":material/compare_arrows:",
+    ),
+    st.Page(
+        _FUNDIES_PAGES / "Fundies_Meteologica.py",
+        title="Meteologica",
+        icon=":material/cloud:",
+    ),
+    st.Page(
+        _FUNDIES_PAGES / "Fundies_Meteologica_Compare.py",
+        title="Meteo Compare",
+        icon=":material/compare_arrows:",
+    ),
 ]
 
 pg = st.navigation(
     {
         "": [home],
         "Fundies": fundies_pages,
+        "Model": model_pages,
     }
 )
 pg.run()
