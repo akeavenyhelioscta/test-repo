@@ -14,9 +14,10 @@ Dom South — the loader's column order).
 
 Usage::
 
-    python -m da_models.common.data.check_loaders.pjm_gas
-    python modelling/da_models/common/data/check_loaders/pjm_gas.py
+    python -m da_models.common.data.check_loaders.ice_python_gas
+    python modelling/da_models/common/data/check_loaders/ice_python_gas.py
 """
+
 from __future__ import annotations
 
 import sys
@@ -48,18 +49,22 @@ HE_COLS: list[str] = [f"HE{h}" for h in range(1, 25)]
 ONPEAK_HE_COLS: list[str] = [f"HE{h}" for h in range(8, 24)]
 OFFPEAK_HE_COLS: list[str] = [c for c in HE_COLS if c not in ONPEAK_HE_COLS]
 ORDERED_COLS: list[str] = [
-    "Date", "OnPeak", "OffPeak", "Flat", *HE_COLS,
+    "Date",
+    "OnPeak",
+    "OffPeak",
+    "Flat",
+    *HE_COLS,
 ]
 
 _NUMERIC_COLS: list[str] = ["OnPeak", "OffPeak", "Flat", *HE_COLS]
 _FORMATTERS: dict = {
-    col: (lambda v: "" if pd.isna(v) else f"{v:>8,.3f}")
-    for col in _NUMERIC_COLS
+    col: (lambda v: "" if pd.isna(v) else f"{v:>8,.3f}") for col in _NUMERIC_COLS
 }
 
 
-def _pjm_gas_wide_for_hub(
-    gas: pd.DataFrame, hub_col: str,
+def _ice_python_gas_wide_for_hub(
+    gas: pd.DataFrame,
+    hub_col: str,
 ) -> pd.DataFrame:
     """Pivot the gas frame to wide for a single hub.
 
@@ -68,15 +73,12 @@ def _pjm_gas_wide_for_hub(
     if gas.empty or hub_col not in gas.columns:
         return pd.DataFrame(columns=ORDERED_COLS)
 
-    pivot = (
-        gas.pivot_table(
-            index="date",
-            columns="hour_ending",
-            values=hub_col,
-            aggfunc="mean",
-        )
-        .reindex(columns=range(1, 25))
-    )
+    pivot = gas.pivot_table(
+        index="date",
+        columns="hour_ending",
+        values=hub_col,
+        aggfunc="mean",
+    ).reindex(columns=range(1, 25))
     pivot.columns = [f"HE{h}" for h in pivot.columns]
     pivot["OnPeak"] = pivot[ONPEAK_HE_COLS].mean(axis=1)
     pivot["OffPeak"] = pivot[OFFPEAK_HE_COLS].mean(axis=1)
@@ -84,13 +86,11 @@ def _pjm_gas_wide_for_hub(
     pivot = pivot.reset_index().rename(columns={"date": "Date"})
 
     return (
-        pivot[ORDERED_COLS]
-        .sort_values("Date", ascending=False)
-        .reset_index(drop=True)
+        pivot[ORDERED_COLS].sort_values("Date", ascending=False).reset_index(drop=True)
     )
 
 
-def build_pjm_gas_table(
+def build_ice_python_gas_table(
     hub_col: str = HUBS[0][0],
     cache_dir: Path | None = CACHE_DIR,
     lookback_days: int | None = LOOKBACK_DAYS,
@@ -106,10 +106,10 @@ def build_pjm_gas_table(
     if lookback_days is not None and not gas.empty:
         cutoff = gas["date"].max() - timedelta(days=lookback_days - 1)
         gas = gas[gas["date"] >= cutoff]
-    return _pjm_gas_wide_for_hub(gas, hub_col)
+    return _ice_python_gas_wide_for_hub(gas, hub_col)
 
 
-def _print_pjm_gas_hub_block(
+def _print_ice_python_gas_hub_block(
     pl,
     gas: pd.DataFrame,
     hub_col: str,
@@ -118,7 +118,7 @@ def _print_pjm_gas_hub_block(
     """Print one hub's gas section: header, metadata, table."""
     print_section(f"{hub_label} ({hub_col})")
 
-    table = _pjm_gas_wide_for_hub(gas, hub_col)
+    table = _ice_python_gas_wide_for_hub(gas, hub_col)
     if table.empty:
         pl.warning(f"No gas data for hub={hub_col}.")
         return
@@ -128,14 +128,15 @@ def _print_pjm_gas_hub_block(
     flat_min = table["Flat"].min()
     flat_max = table["Flat"].max()
     pl.info(f"{hub_label}: rows={len(table):,} | date range: {date_min} -> {date_max}")
-    pl.info(
-        f"{hub_label}: Flat range: ${flat_min:,.3f} -> ${flat_max:,.3f} /MMBtu"
-    )
+    pl.info(f"{hub_label}: Flat range: ${flat_min:,.3f} -> ${flat_max:,.3f} /MMBtu")
 
     with pd.option_context(
-        "display.max_rows", None,
-        "display.max_columns", None,
-        "display.width", None,
+        "display.max_rows",
+        None,
+        "display.max_columns",
+        None,
+        "display.width",
+        None,
     ):
         print(table.to_string(index=False, formatters=_FORMATTERS))
 
@@ -150,7 +151,7 @@ def run(
         if callable(reconfigure):
             reconfigure(encoding="utf-8", errors="replace")
 
-    pl = init_logging(name="check_loaders_pjm_gas", log_dir=LOG_DIR)
+    pl = init_logging(name="check_loaders_ice_python_gas", log_dir=LOG_DIR)
     try:
         lookback_label = (
             f"last {lookback_days}d" if lookback_days is not None else "all dates"
@@ -169,7 +170,7 @@ def run(
             gas = gas[gas["date"] >= cutoff]
 
         for hub_col, hub_label in hubs:
-            _print_pjm_gas_hub_block(pl, gas, hub_col, hub_label)
+            _print_ice_python_gas_hub_block(pl, gas, hub_col, hub_label)
 
         pl.success(
             f"Printed {len(hubs)} hub(s): "

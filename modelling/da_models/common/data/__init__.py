@@ -3,6 +3,7 @@
 from da_models.common.data.loader import (
     load_fuel_mix,
     load_gas_prices_hourly,
+    load_lmp_system_energy_da,
     load_lmps_da,
     load_load_coalesced,
     load_load_forecast,
@@ -28,6 +29,7 @@ from da_models.common.data.loader import (
 __all__ = [
     "load_fuel_mix",
     "load_gas_prices_hourly",
+    "load_lmp_system_energy_da",
     "load_lmps_da",
     "load_load_coalesced",
     "load_load_forecast",
