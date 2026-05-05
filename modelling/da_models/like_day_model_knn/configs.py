@@ -33,13 +33,32 @@ PJM_DATES_DAILY_PARQUET: str = "pjm_dates_daily.parquet"
 LOAD_FORECAST_PARQUETS: list[str] = ["pjm_load_forecast_hourly_da_cutoff.parquet"]
 
 # ── Forecast defaults ──────────────────────────────────────────────────
+# Defaults aligned with ``like_day_model_knn_sunny`` and the
+# ``pjm_dashboard_handoff`` production config: smaller min-pool floor
+# (per-HE matching produces a thinner candidate set), no hard age cap
+# (recency handled via the linear pre-selection penalty below), DOW
+# filtering OFF by default (calendar similarity stays in the distance
+# metric as a soft signal — the no-filter setup beat exact-DOW and
+# weekend-group filters across MAE/bias/coverage/pinball on the
+# 2025-04 to 2025-05 window).
 DEFAULT_TARGET_DATE: date = date.today() + timedelta(days=1)
 DEFAULT_N_ANALOGS: int = 20
-MIN_POOL_SIZE: int = 100
+MIN_POOL_SIZE: int = 30
 SEASON_WINDOW_DAYS: int = 60
+
+# Label source for the KNN regression target.
+#   "hub_lmp"        -> total LMP at HUB (default; current behavior)
+#   "system_energy"  -> RTO system-energy price (LMP minus congestion + loss)
+# System energy is identical across hubs for a given hour so the choice
+# of ``hub`` is irrelevant when this is set; we keep filtering for safety.
+# NOTE: plumbing into the loader/builder is staged — adding the constant
+# here gives the configuration surface; loader support comes next.
+LABEL_SOURCE: str = "hub_lmp"
 
 # ── Calendar / day-type pre-filtering ──────────────────────────────────
 # Sun=0..Sat=6 numbering matches pjm_dates_daily.day_of_week_number.
+# DOW_GROUPS is retained for back-compat / explicit opt-in — production
+# default below is ``FILTER_SAME_DOW_GROUP=False`` (sunny parity).
 DOW_GROUPS: dict[str, list[int]] = {
     "early_week": [1, 2, 3],  # Mon, Tue, Wed
     "late_week": [4, 5],  # Thu, Fri (structural Thu/Fri price premium)
@@ -51,33 +70,38 @@ DAY_TYPE_WEEKDAY: str = "weekday"
 DAY_TYPE_SATURDAY: str = "saturday"
 DAY_TYPE_SUNDAY: str = "sunday"
 
-FILTER_SAME_DOW_GROUP: bool = True
+FILTER_SAME_DOW_GROUP: bool = False
+FILTER_SAME_WEEKEND_GROUP: bool = False
+FILTER_SAME_WEEKEND_GROUP_FOR_WEEKENDS: bool = False
 FILTER_EXCLUDE_HOLIDAYS: bool = True
 EXCLUDE_DATES: list[str] = []  # add YYYY-MM-DD strings to drop from the pool
 
-# Recency controls. Both default to None (no recency adjustment) so that
-# behavior is unchanged unless a config explicitly opts in.
-#   - MAX_AGE_YEARS: hard cap on candidate age. Drops candidates older than
-#     ``target_date - N years``. Use as a structural-break ablation; below
-#     ~3 years the pool starves on weekends.
-#   - RECENCY_HALF_LIFE_YEARS: soft exponential decay on the analog weight
-#     post-selection. ``weight *= 0.5 ** (age_years / half_life)``.
-#     Doesn't change pool composition; only how analogs blend in the forecast.
-MAX_AGE_YEARS: int | None = 3
-RECENCY_HALF_LIFE_YEARS: float | None = 2.0
+# Recency control: linear pre-selection multiplier
+# ``distance *= 1 + age_days / max(half_life_days, 1)``.
+# Days-based and applied BEFORE top-N selection — older candidates get
+# penalized distances and so are less likely to be picked at all
+# (matches sunny's ``calendar.linear_age_penalty``). The previous
+# exponential post-selection weight decay (``RECENCY_HALF_LIFE_YEARS``)
+# is removed: it changed only how analogs blend, not which were
+# selected, which under-weighted the recency signal.
+RECENCY_HALF_LIFE_DAYS: float = 730.0  # ~2y, matches sunny
 
-# Saturday/Sunday narrow the window and tighten DOW matching.
-# Only knobs that exist on KnnModelConfig are listed here — no feature_group
-# weight overrides, since this load-only package doesn't have non-load groups.
+# Optional hard age cap. ``None`` = no cap (default; recency handled by
+# the linear penalty above). Set to an integer to drop anything older.
+MAX_AGE_YEARS: int | None = None
+
+# Saturday/Sunday narrow the season window and reduce K. The sat/sun
+# profiles previously also enabled ``same_dow_group`` — now switched to
+# ``same_weekend_group_for_weekends`` for sunny parity.
 DAY_TYPE_SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     DAY_TYPE_WEEKDAY: {},
     DAY_TYPE_SATURDAY: {
-        "same_dow_group": True,
+        "same_weekend_group_for_weekends": True,
         "season_window_days": 45,
         "n_analogs": 12,
     },
     DAY_TYPE_SUNDAY: {
-        "same_dow_group": True,
+        "same_weekend_group_for_weekends": True,
         "season_window_days": 60,
         "n_analogs": 10,
     },
@@ -210,14 +234,19 @@ class KnnModelConfig:
 
     # Calendar / day-type pre-filter knobs
     same_dow_group: bool = FILTER_SAME_DOW_GROUP
+    same_weekend_group: bool = FILTER_SAME_WEEKEND_GROUP
+    same_weekend_group_for_weekends: bool = FILTER_SAME_WEEKEND_GROUP_FOR_WEEKENDS
     exclude_holidays: bool = FILTER_EXCLUDE_HOLIDAYS
     exclude_dates: list[str] = field(default_factory=lambda: list(EXCLUDE_DATES))
     use_day_type_profiles: bool = True
     day_type_profiles: dict[str, dict[str, Any]] | None = None
 
-    # Recency knobs (default None = unchanged behavior)
+    # Recency knobs
     max_age_years: int | None = MAX_AGE_YEARS
-    recency_half_life_years: float | None = RECENCY_HALF_LIFE_YEARS
+    recency_half_life_days: float = RECENCY_HALF_LIFE_DAYS
+
+    # Label source: "hub_lmp" or "system_energy". See LABEL_SOURCE doc.
+    label_source: str = LABEL_SOURCE
 
     def resolved_target_date(self) -> date:
         if self.forecast_date:

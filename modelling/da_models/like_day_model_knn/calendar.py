@@ -38,7 +38,7 @@ __all__ = [
     "apply_calendar_filter",
     "filtered_pool_for_target",
     "age_years",
-    "age_decay_weights",
+    "linear_age_penalty",
 ]
 
 
@@ -175,6 +175,8 @@ def apply_calendar_filter(
     dates_meta: pd.DataFrame | None,
     *,
     same_dow_group: bool = configs.FILTER_SAME_DOW_GROUP,
+    same_weekend_group: bool = configs.FILTER_SAME_WEEKEND_GROUP,
+    same_weekend_group_for_weekends: bool = configs.FILTER_SAME_WEEKEND_GROUP_FOR_WEEKENDS,
     exclude_holidays: bool = configs.FILTER_EXCLUDE_HOLIDAYS,
     exclude_dates: list[str] | None = None,
     max_age_years: int | None = None,
@@ -190,6 +192,11 @@ def apply_calendar_filter(
          ``exclude_holidays`` is True
       4. keep only dates in the same DOW group as the target when
          ``same_dow_group`` is True
+      5. keep only dates with matching ``is_weekend`` flag when
+         ``same_weekend_group`` is True, OR when target is itself a
+         weekend day and ``same_weekend_group_for_weekends`` is True
+         (sunny parity — weekday targets pass through, weekend targets
+         lock to the weekend candidate set).
 
     Each filter is reverted (its candidates re-included) when applying it
     would push the pool below ``min_pool_size`` — this mirrors the relaxed
@@ -368,6 +375,46 @@ def apply_calendar_filter(
                         would_survive=len(candidates),
                     )
 
+    # 4. same weekend group (sunny parity).
+    target_weekend = int(target_meta.get("is_weekend", 0) or 0)
+    apply_weekend = same_weekend_group or (
+        same_weekend_group_for_weekends and target_weekend == 1
+    )
+    if apply_weekend and "is_weekend" in work.columns:
+        before = len(work)
+        candidates = work[work["is_weekend"].fillna(0).astype(int) == target_weekend]
+        weekend_label = "weekend" if target_weekend == 1 else "weekday"
+        if len(candidates) >= min_pool_size:
+            work = candidates
+            logger.info(
+                "calendar filter: same weekend group (%s) kept %d candidates (dropped %d)",
+                weekend_label,
+                len(work),
+                before - len(work),
+            )
+            if funnel is not None:
+                funnel.record(
+                    "same weekend group",
+                    f"is_weekend={target_weekend} ({weekend_label})",
+                    before=before,
+                    after=len(work),
+                )
+        else:
+            logger.warning(
+                "calendar filter: same weekend group would leave only %d (< min %d) - relaxing",
+                len(candidates),
+                min_pool_size,
+            )
+            if funnel is not None:
+                funnel.record(
+                    "same weekend group",
+                    f"is_weekend={target_weekend} ({weekend_label})",
+                    before=before,
+                    after=before,
+                    relaxed=True,
+                    would_survive=len(candidates),
+                )
+
     return work.reset_index(drop=True)
 
 
@@ -384,6 +431,16 @@ def filtered_pool_for_target(
         dates_meta=dates_meta,
         same_dow_group=bool(
             getattr(cfg, "same_dow_group", configs.FILTER_SAME_DOW_GROUP)
+        ),
+        same_weekend_group=bool(
+            getattr(cfg, "same_weekend_group", configs.FILTER_SAME_WEEKEND_GROUP)
+        ),
+        same_weekend_group_for_weekends=bool(
+            getattr(
+                cfg,
+                "same_weekend_group_for_weekends",
+                configs.FILTER_SAME_WEEKEND_GROUP_FOR_WEEKENDS,
+            )
         ),
         exclude_holidays=bool(
             getattr(cfg, "exclude_holidays", configs.FILTER_EXCLUDE_HOLIDAYS)
@@ -407,22 +464,26 @@ def age_years(
     return ((target_ts - dates).dt.days / 365.25).to_numpy(dtype=float)
 
 
-def age_decay_weights(
+def linear_age_penalty(
+    distances: np.ndarray,
     candidate_dates: pd.Series | np.ndarray | list,
     target_date: date,
-    half_life_years: float | None,
+    half_life_days: float,
 ) -> np.ndarray:
-    """Exponential decay multiplier for analog weights based on candidate age.
+    """Multiply distances by ``1 + age_days / max(half_life_days, 1)``.
 
-    With ``half_life_years=2.0``, a 4-year-old candidate is multiplied by 0.25
-    relative to a same-day candidate. Returns all-ones when ``half_life_years``
-    is None or non-positive — caller can multiply unconditionally.
+    Applied BEFORE top-N selection — older candidates receive larger
+    distances and so are less likely to be picked at all (in contrast
+    to the prior post-selection exponential decay this replaces).
+    Faithful to ``like_day_model_knn_sunny.calendar.linear_age_penalty``
+    and to Sunny's original ``forecast.py:587-589``.
     """
-    n = len(list(candidate_dates))
-    if half_life_years is None or float(half_life_years) <= 0:
-        return np.ones(n, dtype=float)
-    ages = age_years(candidate_dates, target_date)
-    return 0.5 ** (ages / float(half_life_years))
+    target_ts = pd.Timestamp(target_date)
+    dates = pd.to_datetime(pd.Series(list(candidate_dates)))
+    age = ((target_ts - dates).dt.days).to_numpy(dtype=float)
+    age = np.maximum(age, 0.0)
+    half = float(max(half_life_days, 1.0))
+    return distances * (1.0 + age / half)
 
 
 # ── Light-weight smoke test ────────────────────────────────────────────

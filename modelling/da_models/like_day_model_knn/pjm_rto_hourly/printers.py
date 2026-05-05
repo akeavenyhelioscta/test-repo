@@ -85,10 +85,11 @@ def print_config(
     print(f"  Spec          {spec.name}")
     print(f"  Description   {spec.description}")
 
-    half_life = config.recency_half_life_years
-    if half_life is not None and float(half_life) > 0:
+    half_life_days = float(getattr(config, "recency_half_life_days", 0.0) or 0.0)
+    if half_life_days > 0:
         weight_method = (
-            f"inverse_distance + age_decay (half-life={float(half_life):g}y)"
+            "inverse_distance (analog weights) + linear pre-selection age "
+            f"penalty (half-life={half_life_days:g} days)"
         )
     else:
         weight_method = "inverse_distance"
@@ -104,6 +105,10 @@ def print_config(
         f"({win_start.strftime('%b %d')} - {win_end.strftime('%b %d')})"
     )
     print(f"  DOW group filter   {config.same_dow_group}")
+    print(
+        f"  Weekend filter     same_weekend_group={config.same_weekend_group}  "
+        f"for_weekends={config.same_weekend_group_for_weekends}"
+    )
     print(f"  Exclude holidays   {config.exclude_holidays}")
     if config.exclude_dates:
         print(f"  Exclude dates      {', '.join(config.exclude_dates)}")
@@ -111,7 +116,8 @@ def print_config(
 
     print_section("Recency")
     print(f"  Max age years      {config.max_age_years}")
-    print(f"  Half-life years    {config.recency_half_life_years}")
+    print(f"  Half-life days     {half_life_days:g}")
+    print(f"  Label source       {getattr(config, 'label_source', 'hub_lmp')}")
 
     from da_models.like_day_model_knn import configs as _configs_module
     from da_models.like_day_model_knn.domains import feature_group_weight_locations

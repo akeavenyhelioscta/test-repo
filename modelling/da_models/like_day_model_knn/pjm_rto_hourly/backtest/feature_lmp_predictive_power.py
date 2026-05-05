@@ -520,6 +520,8 @@ def _apply_knn_funnel(
         min_pool_size=configs.MIN_POOL_SIZE,
         dates_meta=dates_meta,
         same_dow_group=configs.FILTER_SAME_DOW_GROUP,
+        same_weekend_group=configs.FILTER_SAME_WEEKEND_GROUP,
+        same_weekend_group_for_weekends=configs.FILTER_SAME_WEEKEND_GROUP_FOR_WEEKENDS,
         exclude_holidays=configs.FILTER_EXCLUDE_HOLIDAYS,
         exclude_dates=list(configs.EXCLUDE_DATES),
         max_age_years=configs.MAX_AGE_YEARS,

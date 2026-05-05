@@ -40,6 +40,8 @@ def _candidate_pool(
     min_pool_size: int,
     dates_meta: pd.DataFrame | None = None,
     same_dow_group: bool = False,
+    same_weekend_group: bool = False,
+    same_weekend_group_for_weekends: bool = False,
     exclude_holidays: bool = False,
     exclude_dates: list[str] | None = None,
     max_age_years: int | None = None,
@@ -57,14 +59,22 @@ def _candidate_pool(
         )
     if len(work) == 0:
         return work
-    if (same_dow_group or exclude_holidays or exclude_dates or max_age_years) and (
-        dates_meta is not None or max_age_years
-    ):
+    needs_filter = (
+        same_dow_group
+        or same_weekend_group
+        or same_weekend_group_for_weekends
+        or exclude_holidays
+        or exclude_dates
+        or max_age_years
+    )
+    if needs_filter and (dates_meta is not None or max_age_years):
         work = _calendar.apply_calendar_filter(
             pool=work,
             target_date=target_date,
             dates_meta=dates_meta,
             same_dow_group=same_dow_group,
+            same_weekend_group=same_weekend_group,
+            same_weekend_group_for_weekends=same_weekend_group_for_weekends,
             exclude_holidays=exclude_holidays,
             exclude_dates=exclude_dates,
             max_age_years=max_age_years,
@@ -233,10 +243,12 @@ def find_twins(
     min_pool_size: int = configs.MIN_POOL_SIZE,
     dates_meta: pd.DataFrame | None = None,
     same_dow_group: bool = False,
+    same_weekend_group: bool = False,
+    same_weekend_group_for_weekends: bool = False,
     exclude_holidays: bool = False,
     exclude_dates: list[str] | None = None,
     max_age_years: int | None = None,
-    recency_half_life_years: float | None = None,
+    recency_half_life_days: float = configs.RECENCY_HALF_LIFE_DAYS,
     feature_group_weights_override: dict[str, float] | None = None,
     funnel: _calendar.FunnelCounts | None = None,
 ) -> pd.DataFrame:
@@ -272,6 +284,8 @@ def find_twins(
         min_pool_size,
         dates_meta=dates_meta,
         same_dow_group=same_dow_group,
+        same_weekend_group=same_weekend_group,
+        same_weekend_group_for_weekends=same_weekend_group_for_weekends,
         exclude_holidays=exclude_holidays,
         exclude_dates=exclude_dates,
         max_age_years=max_age_years,
@@ -377,6 +391,24 @@ def find_twins(
             combined[load_only] = d[load_only]
             d = combined
 
+        # Linear pre-selection age penalty: ``d *= 1 + age_days / half_life``.
+        # Applied BEFORE top-N argsort so older candidates are less likely
+        # to be picked at all. Replaces the previous post-selection
+        # exponential weight decay (which only changed how analogs blended,
+        # not which were selected). Faithful to sunny's
+        # ``calendar.linear_age_penalty``.
+        if recency_half_life_days and recency_half_life_days > 0:
+            finite_mask = np.isfinite(d)
+            if finite_mask.any():
+                d = d.copy()
+                pool_dates = work["date"].to_list()
+                d[finite_mask] = _calendar.linear_age_penalty(
+                    d[finite_mask],
+                    [pool_dates[i] for i in np.flatnonzero(finite_mask)],
+                    target_date,
+                    float(recency_half_life_days),
+                )
+
         order = np.argsort(d)
         order = order[np.isfinite(d[order])]
         order = order[:n_analogs]
@@ -386,15 +418,10 @@ def find_twins(
         d_top = d[order]
         eps = 1e-6
         inv_dist = 1.0 / (d_top + eps)
-        top_dates = work.iloc[[int(i) for i in order]]["date"].to_list()
-        decay = _calendar.age_decay_weights(
-            top_dates, target_date, recency_half_life_years
-        )
-        raw = inv_dist * decay
-        if raw.sum() <= 0:
+        if inv_dist.sum() <= 0:
             analog_weights = np.full(len(d_top), 1.0 / max(1, len(d_top)))
         else:
-            analog_weights = raw / raw.sum()
+            analog_weights = inv_dist / inv_dist.sum()
 
         lmp_col = f"lmp_h{h}"
         for rank, (idx_arr, dist, w) in enumerate(

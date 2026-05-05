@@ -207,10 +207,12 @@ def run(
         min_pool_size=config.min_pool_size,
         dates_meta=dates_meta,
         same_dow_group=config.same_dow_group,
+        same_weekend_group=config.same_weekend_group,
+        same_weekend_group_for_weekends=config.same_weekend_group_for_weekends,
         exclude_holidays=config.exclude_holidays,
         exclude_dates=config.exclude_dates,
         max_age_years=config.max_age_years,
-        recency_half_life_years=config.recency_half_life_years,
+        recency_half_life_days=config.recency_half_life_days,
         feature_group_weights_override=feature_group_weights_override,
         funnel=funnel,
     )
