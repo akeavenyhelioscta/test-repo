@@ -11,6 +11,7 @@ Usage::
     python -m da_models.naive_baselines.pjm_rto_hourly.backtest.single_day_backtest
     python modelling/da_models/naive_baselines/pjm_rto_hourly/backtest/single_day_backtest.py
 """
+
 from __future__ import annotations
 
 import sys
@@ -30,7 +31,7 @@ colorama_init()
 
 from da_models.common.forecast.output import actuals_from_pool  # noqa: E402
 from da_models.like_day_model_knn import configs as like_day_configs  # noqa: E402
-from da_models.like_day_model_knn.pjm_rto_hourly.metrics import (  # noqa: E402
+from da_models.common.evaluation.metrics import (  # noqa: E402
     evaluate_shape,
 )
 from da_models.naive_baselines._shared import build_lmp_only_pool  # noqa: E402
@@ -40,7 +41,7 @@ from da_models.naive_baselines.pjm_rto_hourly.pipelines.forecast_single_day impo
 
 
 # ── Defaults (edit here instead of using CLI flags) ────────────────────────
-TARGET_DATE: date | None = date(2026, 4, 30)   # None -> yesterday (date.today() - 1d)
+TARGET_DATE: date | None = date(2026, 4, 30)  # None -> yesterday (date.today() - 1d)
 HUB: str = like_day_configs.HUB
 CACHE_DIR: Path | None = None
 BASELINES: tuple[str, ...] = ("epf", "d7")
@@ -54,78 +55,113 @@ def _resolve_target_date(target_date: date | None) -> date:
 
 
 def _execute_baseline(
-    *, baseline: str, target_date: date, pool: pd.DataFrame,
+    *,
+    baseline: str,
+    target_date: date,
+    pool: pd.DataFrame,
 ) -> dict:
     started = time.perf_counter()
     base: dict = {"baseline": baseline, "status": "ok", "error_message": None}
     try:
         result = naive_run(
-            target_date=target_date, baseline=baseline, pool=pool, quiet=True,
+            target_date=target_date,
+            baseline=baseline,
+            pool=pool,
+            quiet=True,
         )
     except Exception as exc:
-        base.update({
-            "status": "failed",
-            "error_message": f"{type(exc).__name__}: {exc}",
-            "duration_s": round(time.perf_counter() - started, 3),
-        })
+        base.update(
+            {
+                "status": "failed",
+                "error_message": f"{type(exc).__name__}: {exc}",
+                "duration_s": round(time.perf_counter() - started, 3),
+            }
+        )
         return base
 
     metrics = result.get("metrics") or {}
     output_table = result.get("output_table")
     forecast_row = (
         output_table[output_table["Type"] == "Forecast"].iloc[0]
-        if output_table is not None and len(output_table) else None
+        if output_table is not None and len(output_table)
+        else None
     )
     actual_row = (
         output_table[output_table["Type"] == "Actual"].iloc[0]
-        if output_table is not None and (output_table["Type"] == "Actual").any() else None
+        if output_table is not None and (output_table["Type"] == "Actual").any()
+        else None
     )
     error_row = (
         output_table[output_table["Type"] == "Error"].iloc[0]
-        if output_table is not None and (output_table["Type"] == "Error").any() else None
+        if output_table is not None and (output_table["Type"] == "Error").any()
+        else None
     )
 
     hourly_forecast = (
-        [float(forecast_row[f"HE{h}"]) if pd.notna(forecast_row[f"HE{h}"]) else None
-         for h in range(1, 25)]
-        if forecast_row is not None else [None] * 24
+        [
+            float(forecast_row[f"HE{h}"]) if pd.notna(forecast_row[f"HE{h}"]) else None
+            for h in range(1, 25)
+        ]
+        if forecast_row is not None
+        else [None] * 24
     )
     hourly_actual = (
-        [float(actual_row[f"HE{h}"]) if pd.notna(actual_row[f"HE{h}"]) else None
-         for h in range(1, 25)]
-        if actual_row is not None else [None] * 24
+        [
+            float(actual_row[f"HE{h}"]) if pd.notna(actual_row[f"HE{h}"]) else None
+            for h in range(1, 25)
+        ]
+        if actual_row is not None
+        else [None] * 24
     )
     hourly_abs_error = (
-        [abs(float(error_row[f"HE{h}"])) if pd.notna(error_row[f"HE{h}"]) else None
-         for h in range(1, 25)]
-        if error_row is not None else [None] * 24
+        [
+            abs(float(error_row[f"HE{h}"])) if pd.notna(error_row[f"HE{h}"]) else None
+            for h in range(1, 25)
+        ]
+        if error_row is not None
+        else [None] * 24
     )
 
-    base.update({
-        "baseline_name": result.get("baseline_name"),
-        "mae": metrics.get("mae"),
-        "rmse": metrics.get("rmse"),
-        "mape": metrics.get("mape"),
-        "forecast_onpeak": float(forecast_row["OnPeak"]) if forecast_row is not None else None,
-        "forecast_offpeak": float(forecast_row["OffPeak"]) if forecast_row is not None else None,
-        "forecast_flat": float(forecast_row["Flat"]) if forecast_row is not None else None,
-        "hourly_forecast": hourly_forecast,
-        "hourly_actual": hourly_actual,
-        "hourly_abs_error": hourly_abs_error,
-        "output_table": output_table,
-        "duration_s": round(time.perf_counter() - started, 3),
-    })
+    base.update(
+        {
+            "baseline_name": result.get("baseline_name"),
+            "mae": metrics.get("mae"),
+            "rmse": metrics.get("rmse"),
+            "mape": metrics.get("mape"),
+            "forecast_onpeak": float(forecast_row["OnPeak"])
+            if forecast_row is not None
+            else None,
+            "forecast_offpeak": float(forecast_row["OffPeak"])
+            if forecast_row is not None
+            else None,
+            "forecast_flat": float(forecast_row["Flat"])
+            if forecast_row is not None
+            else None,
+            "hourly_forecast": hourly_forecast,
+            "hourly_actual": hourly_actual,
+            "hourly_abs_error": hourly_abs_error,
+            "output_table": output_table,
+            "duration_s": round(time.perf_counter() - started, 3),
+        }
+    )
     return base
 
 
 def _print_comparison(
-    rows: list[dict], target_date: date, hub: str, actuals_summary: dict[str, float],
+    rows: list[dict],
+    target_date: date,
+    hub: str,
+    actuals_summary: dict[str, float],
 ) -> None:
     print("\n" + "=" * 100)
-    print(f"  NAIVE BASELINES — {target_date} ({target_date.strftime('%a')})  |  Hub: {hub}")
-    print(f"  Actuals  OnPeak={actuals_summary['onpeak']:>7.2f}  "
-          f"OffPeak={actuals_summary['offpeak']:>7.2f}  "
-          f"Flat={actuals_summary['flat']:>7.2f}  ($/MWh)")
+    print(
+        f"  NAIVE BASELINES — {target_date} ({target_date.strftime('%a')})  |  Hub: {hub}"
+    )
+    print(
+        f"  Actuals  OnPeak={actuals_summary['onpeak']:>7.2f}  "
+        f"OffPeak={actuals_summary['offpeak']:>7.2f}  "
+        f"Flat={actuals_summary['flat']:>7.2f}  ($/MWh)"
+    )
     print(f"  Baselines: {len(rows)}")
     print("=" * 100)
 
@@ -136,10 +172,17 @@ def _print_comparison(
     if len(ok) == 0:
         print("\n  No successful baselines; nothing to summarize.\n")
     else:
-        ok = ok.sort_values("mae", ascending=True, na_position="last").reset_index(drop=True)
+        ok = ok.sort_values("mae", ascending=True, na_position="last").reset_index(
+            drop=True
+        )
         cols = [
-            "baseline_name", "mae", "rmse", "mape",
-            "forecast_onpeak", "forecast_offpeak", "forecast_flat",
+            "baseline_name",
+            "mae",
+            "rmse",
+            "mape",
+            "forecast_onpeak",
+            "forecast_offpeak",
+            "forecast_flat",
         ]
         formatters = {
             "mae": lambda v: f"{v:>7.2f}" if pd.notna(v) else "    n/a",
@@ -181,25 +224,35 @@ def _print_shape_metrics(rows: list[dict], target_date: date) -> None:
 
     df = pd.DataFrame(shape_rows)
     df = df.sort_values(
-        "variogram_score_p05", ascending=True, na_position="last",
+        "variogram_score_p05",
+        ascending=True,
+        na_position="last",
     ).reset_index(drop=True)
 
     cols = [
-        "baseline_name", "variogram_score_p05",
-        "peak_height_err", "peak_at_actual_hour_err", "time_of_peak_err",
-        "valley_height_err", "valley_at_actual_hour_err", "time_of_valley_err",
-        "peak_window_mae", "first_diff_mae",
+        "baseline_name",
+        "variogram_score_p05",
+        "peak_height_err",
+        "peak_at_actual_hour_err",
+        "time_of_peak_err",
+        "valley_height_err",
+        "valley_at_actual_hour_err",
+        "time_of_valley_err",
+        "peak_window_mae",
+        "first_diff_mae",
     ]
     formatters = {
-        "variogram_score_p05":       lambda v: f"{v:>8.4f}" if pd.notna(v) else "     n/a",
-        "peak_height_err":           lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
-        "peak_at_actual_hour_err":   lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
-        "time_of_peak_err":          lambda v: f"{int(v):+3d}h" if pd.notna(v) else "  n/a",
-        "valley_height_err":         lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
-        "valley_at_actual_hour_err": lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
-        "time_of_valley_err":        lambda v: f"{int(v):+3d}h" if pd.notna(v) else "  n/a",
-        "peak_window_mae":           lambda v: f"{v:>7.2f}" if pd.notna(v) else "    n/a",
-        "first_diff_mae":            lambda v: f"{v:>7.2f}" if pd.notna(v) else "    n/a",
+        "variogram_score_p05": lambda v: f"{v:>8.4f}" if pd.notna(v) else "     n/a",
+        "peak_height_err": lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
+        "peak_at_actual_hour_err": lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
+        "time_of_peak_err": lambda v: f"{int(v):+3d}h" if pd.notna(v) else "  n/a",
+        "valley_height_err": lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
+        "valley_at_actual_hour_err": lambda v: (
+            f"{v:+7.2f}" if pd.notna(v) else "    n/a"
+        ),
+        "time_of_valley_err": lambda v: f"{int(v):+3d}h" if pd.notna(v) else "  n/a",
+        "peak_window_mae": lambda v: f"{v:>7.2f}" if pd.notna(v) else "    n/a",
+        "first_diff_mae": lambda v: f"{v:>7.2f}" if pd.notna(v) else "    n/a",
     }
 
     a_max = float(np.max(actual))
@@ -207,8 +260,12 @@ def _print_shape_metrics(rows: list[dict], target_date: date) -> None:
     a_argmax = int(np.argmax(actual))
     a_argmin = int(np.argmin(actual))
     print("=" * 130)
-    print(f"  SHAPE METRICS — {target_date}  (signed err = forecast - actual; sorted by variogram ascending)")
-    print(f"  Actual: peak ${a_max:.2f} at HE{a_argmax + 1}   valley ${a_min:.2f} at HE{a_argmin + 1}")
+    print(
+        f"  SHAPE METRICS — {target_date}  (signed err = forecast - actual; sorted by variogram ascending)"
+    )
+    print(
+        f"  Actual: peak ${a_max:.2f} at HE{a_argmax + 1}   valley ${a_min:.2f} at HE{a_argmin + 1}"
+    )
     print("=" * 130)
     print()
     with pd.option_context("display.max_rows", None, "display.width", None):
@@ -232,7 +289,9 @@ def _print_per_baseline_detail(rows: list[dict], target_date: date, hub: str) ->
         if table is None or len(table) == 0:
             continue
         print("=" * 120)
-        print(f"  HOURLY DETAIL: {r['baseline_name']}  —  {hub} ($/MWh) — {target_date}")
+        print(
+            f"  HOURLY DETAIL: {r['baseline_name']}  —  {hub} ($/MWh) — {target_date}"
+        )
         if r.get("mae") is not None:
             print(f"  MAE: ${r['mae']:.2f}/MWh  |  RMSE: ${r['rmse']:.2f}/MWh")
         print("=" * 120)
@@ -277,8 +336,10 @@ def run(
     print(f"\n[naive_backtest {resolved_date}] building LMP-only pool...")
     t0 = time.perf_counter()
     pool = build_lmp_only_pool(hub=hub, cache_dir=cache_dir)
-    print(f"[naive_backtest {resolved_date}] pool built in "
-          f"{time.perf_counter() - t0:.1f}s ({len(pool)} rows)")
+    print(
+        f"[naive_backtest {resolved_date}] pool built in "
+        f"{time.perf_counter() - t0:.1f}s ({len(pool)} rows)"
+    )
 
     actuals = actuals_from_pool(pool, resolved_date)
     if actuals is None:
@@ -298,9 +359,15 @@ def run(
         row = _execute_baseline(baseline=baseline, target_date=resolved_date, pool=pool)
         tag = "OK" if row["status"] == "ok" else "FAIL"
         mae = row.get("mae")
-        mae_str = f"MAE={mae:.2f}" if isinstance(mae, (int, float)) and pd.notna(mae) else "MAE=n/a"
-        print(f"[naive_backtest {resolved_date}]   {baseline:<6} {tag:<4} "
-              f"{mae_str}  ({row['duration_s']:.2f}s)")
+        mae_str = (
+            f"MAE={mae:.2f}"
+            if isinstance(mae, (int, float)) and pd.notna(mae)
+            else "MAE=n/a"
+        )
+        print(
+            f"[naive_backtest {resolved_date}]   {baseline:<6} {tag:<4} "
+            f"{mae_str}  ({row['duration_s']:.2f}s)"
+        )
         rows.append(row)
 
     _print_comparison(rows, resolved_date, hub, actuals_summary)

@@ -75,22 +75,11 @@ MIN_POOL_SIZE: int | None = None  # None -> configs.MIN_POOL_SIZE
 WRITE_ANALOG_STORE: bool = True
 ANALOG_STORE_DIR: Path | None = None  # None -> DEFAULT_STORE_DIR
 
-# Quantiles needed by the printed bands table (P25..P75 inner) PLUS the
-# wider levels (P10/P90, P05/P95, P01/P99) that evaluate_forecast uses
-# for 80/90/98% prediction-interval coverage.
-DEFAULT_QUANTILES: tuple[float, ...] = (
-    0.01,
-    0.05,
-    0.10,
-    0.25,
-    0.375,
-    0.50,
-    0.625,
-    0.75,
-    0.90,
-    0.95,
-    0.99,
-)
+# 80% PI (P10/P90) + IQR (P25/P75) + median. P01/P05/P95/P99 are dropped
+# because they're statistically unreliable with 20 analogs — they pin to
+# min/max with no real resolution. Drop also disables 90%/98% coverage
+# metrics in ``evaluate_forecast`` (it falls back to None for those).
+DEFAULT_QUANTILES: tuple[float, ...] = (0.10, 0.25, 0.50, 0.75, 0.90)
 DISPLAY_QUANTILES: tuple[float, ...] = DEFAULT_QUANTILES
 
 
@@ -239,7 +228,11 @@ def run(
     has_actuals = actuals is not None
     output_table = build_output_table(resolved_date, df_forecast, actuals)
     quantiles_table = build_quantiles_table(
-        resolved_date, df_forecast, display_quantiles
+        resolved_date,
+        df_forecast,
+        display_quantiles,
+        analogs=analogs,
+        pool=pool,
     )
 
     metrics: dict = {}
@@ -260,8 +253,13 @@ def run(
             metrics = evaluate_forecast(y_true, merged, quantiles, y_naive=y_naive)
 
     if not quiet:
+        from da_models.like_day_model_knn.pjm_rto_hourly.printers import (
+            print_analog_features,
+        )
+
         print_config(config, spec, resolved_date, day_type)
         print_pool_funnel(funnel, resolved_date, day_type, config.hub)
+        print_analog_features(analogs, pool, query, resolved_date, config.hub)
         print_forecast(output_table, metrics if metrics else None)
         print_quantiles(quantiles_table)
 

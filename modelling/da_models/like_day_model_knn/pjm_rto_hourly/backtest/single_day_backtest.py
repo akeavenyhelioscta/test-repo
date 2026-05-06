@@ -54,8 +54,9 @@ from da_models.like_day_model_knn.pjm_rto_hourly.builder import (  # noqa: E402
     build_query_row,
 )
 from da_models.common.forecast.output import actuals_from_pool  # noqa: E402
-from da_models.like_day_model_knn.pjm_rto_hourly.metrics import (  # noqa: E402
+from da_models.common.evaluation.metrics import (  # noqa: E402
     evaluate_shape,
+    evaluate_shape_onpeak,
 )
 from da_models.like_day_model_knn.pjm_rto_hourly.pipelines.forecast_single_day import (  # noqa: E402
     run as forecast_run,
@@ -546,6 +547,99 @@ def _print_metric_breakdown(rows: list[dict], target_date: date) -> None:
     print()
 
 
+def _print_onpeak_shape(rows: list[dict], target_date: date) -> None:
+    """Per-scenario on-peak shape table — HE8-23 weekday block.
+
+    Reuses the locked 24h shape formula on the HE8-23 slice plus the
+    block-mean error (settlement-product number). Sorted by
+    ``variogm_op`` ascending. Companion to ``_print_metric_breakdown``;
+    do not replace it.
+    """
+    ok = [r for r in rows if r["status"] == "ok"]
+    if not ok:
+        return
+    actual_list = ok[0].get("hourly_actual")
+    if actual_list is None or any(v is None for v in actual_list):
+        return
+    actual = np.asarray(actual_list, dtype=float)
+
+    metric_rows: list[dict] = []
+    for r in ok:
+        forecast_list = r.get("hourly_forecast") or [None] * 24
+        if any(v is None for v in forecast_list):
+            metric_rows.append({"scenario_name": r["scenario_name"]})
+            continue
+        forecast = np.asarray(forecast_list, dtype=float)
+        s = evaluate_shape_onpeak(actual, forecast)
+        metric_rows.append(
+            {
+                "scenario_name": r["scenario_name"],
+                "blkMean": s["block_mean_err"],
+                "variogm_op": s["variogram_score_p05_onpeak"],
+                "pkErr_op": s["peak_height_err_onpeak"],
+                "vlErr_op": s["valley_height_err_onpeak"],
+                "tPk_op": s["time_of_peak_err_onpeak"],
+                "tVl_op": s["time_of_valley_err_onpeak"],
+                "pkWinMAE_op": s["peak_window_mae_onpeak"],
+                "fdMAE_op": s["first_diff_mae_onpeak"],
+                "pkOut": s["peak_outside_onpeak"],
+            }
+        )
+
+    df = (
+        pd.DataFrame(metric_rows)
+        .sort_values("variogm_op", ascending=True, na_position="last")
+        .reset_index(drop=True)
+    )
+
+    cols = [
+        "scenario_name",
+        "blkMean",
+        "variogm_op",
+        "pkErr_op",
+        "vlErr_op",
+        "tPk_op",
+        "tVl_op",
+        "pkWinMAE_op",
+        "fdMAE_op",
+        "pkOut",
+    ]
+    formatters = {
+        "blkMean": lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
+        "variogm_op": lambda v: f"{v:>7.4f}" if pd.notna(v) else "    n/a",
+        "pkErr_op": lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
+        "vlErr_op": lambda v: f"{v:+7.2f}" if pd.notna(v) else "    n/a",
+        "tPk_op": lambda v: f"{int(v):+3d}h" if pd.notna(v) else "  n/a",
+        "tVl_op": lambda v: f"{int(v):+3d}h" if pd.notna(v) else "  n/a",
+        "pkWinMAE_op": lambda v: f"{v:>8.2f}" if pd.notna(v) else "     n/a",
+        "fdMAE_op": lambda v: f"{v:>6.2f}" if pd.notna(v) else "   n/a",
+        "pkOut": lambda v: f"{int(v):>3d}" if pd.notna(v) else "n/a",
+    }
+
+    a_slice = actual[7:23]
+    block_mean = float(a_slice.mean())
+    a_argmax_full = int(np.argmax(actual))
+    peak_outside_actual = not (7 <= a_argmax_full <= 22)
+
+    print("=" * 140)
+    print(
+        f"  ON-PEAK SHAPE (HE8-23) — {target_date}  (signed err = forecast - actual; sorted by variogram ascending)"
+    )
+    print(
+        f"  Actuals: block mean ${block_mean:.2f}   "
+        f"full-day peak HE{a_argmax_full + 1}   "
+        f"peak outside on-peak: {'YES' if peak_outside_actual else 'no'}"
+    )
+    print(
+        "  blkMean = mean(forecast)-mean(actual) over HE8-23 (settlement); pkOut = full-day peak outside [HE8,HE23]"
+    )
+    print("=" * 140)
+    print()
+    with pd.option_context("display.max_rows", None, "display.width", None):
+        print(df[cols].to_string(index=False, formatters=formatters))
+    print()
+
+
 def _print_per_scenario_detail(rows: list[dict], target_date: date) -> None:
     """One Actual / Forecast / Error block per scenario.
 
@@ -783,6 +877,7 @@ def run(
 
     _print_comparison(rows, resolved_date, actuals_summary)
     _print_metric_breakdown(rows, resolved_date)
+    _print_onpeak_shape(rows, resolved_date)
     _print_per_scenario_detail(rows, resolved_date)
     return rows
 

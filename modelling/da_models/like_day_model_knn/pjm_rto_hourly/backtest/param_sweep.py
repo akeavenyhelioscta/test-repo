@@ -41,6 +41,10 @@ from da_models.like_day_model_knn.pjm_rto_hourly.builder import (  # noqa: E402
     build_pool,
     build_query_row,
 )
+from da_models.common.evaluation.metrics import (  # noqa: E402
+    evaluate_shape,
+    evaluate_shape_onpeak,
+)
 from da_models.common.forecast.output import actuals_from_pool  # noqa: E402
 from da_models.like_day_model_knn.pjm_rto_hourly.pipelines.forecast_single_day import (  # noqa: E402
     run as forecast_run,
@@ -235,6 +239,18 @@ def _execute_scenario(
             "duration_s": round(time.perf_counter() - started, 3),
         }
     )
+
+    if forecast_row is not None and actual_row is not None:
+        forecast_arr = np.asarray(
+            [forecast_row[f"HE{h}"] for h in range(1, 25)], dtype=float
+        )
+        actual_arr = np.asarray(
+            [actual_row[f"HE{h}"] for h in range(1, 25)], dtype=float
+        )
+        if forecast_arr.shape == (24,) and actual_arr.shape == (24,):
+            base.update(evaluate_shape(actual_arr, forecast_arr))
+            base.update(evaluate_shape_onpeak(actual_arr, forecast_arr))
+
     overrides = scenario.get("overrides") or {}
     for k in _RUN_KWARGS_PASSTHROUGH:
         base[f"override_{k}"] = overrides.get(k)

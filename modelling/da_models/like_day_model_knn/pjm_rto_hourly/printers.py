@@ -6,7 +6,10 @@ side-by-side run produces visually-comparable terminal output.
 
 Adapted to the per-hour KNN engine's output shape: analogs are emitted
 per (hour_ending, rank) pair, so the analogs table aggregates per-date
-(n_hours appeared, mean distance, summed weight).
+(n_hours appeared, mean distance, summed weight). The richer
+``print_analog_features`` view (daily features + per-HE z-strips) is
+ported from the sibling like_day_model_knn_sunny printer to keep the
+two terminal reports visually identical.
 """
 
 from __future__ import annotations
@@ -26,15 +29,12 @@ from utils.logging_utils import (
     supports_color,
 )
 
-# Enable ANSI on Windows terminals once at import time. supports_color()
-# calls SetConsoleMode on win32 with side-effects we want to trigger here
-# so the ANSI escapes inside _HL_* render correctly without colorama.
 _COLOR_ON = supports_color()
 _HL_FORECAST = (Colors.BOLD + Colors.BRIGHT_RED) if _COLOR_ON else ""
-_HL_QUARTILE = Colors.CYAN if _COLOR_ON else ""  # P25 / P75
-_HL_INNER = Colors.YELLOW if _COLOR_ON else ""  # P37.5 / P62.5
-_HL_UP = Colors.BRIGHT_GREEN if _COLOR_ON else ""  # analog feature > target
-_HL_DOWN = Colors.BRIGHT_RED if _COLOR_ON else ""  # analog feature < target
+_HL_QUARTILE = Colors.CYAN if _COLOR_ON else ""
+_HL_INNER = Colors.YELLOW if _COLOR_ON else ""
+_HL_UP = Colors.BRIGHT_GREEN if _COLOR_ON else ""
+_HL_DOWN = Colors.BRIGHT_RED if _COLOR_ON else ""
 _RS = Colors.RESET if _COLOR_ON else ""
 _ROW_STYLES: dict[str, str] = {
     "Forecast": _HL_FORECAST,
@@ -53,6 +53,16 @@ DAY_ABBR: dict[int, str] = {
     5: "Sat",
     6: "Sun",
 }
+
+_FEATURE_KEYS: tuple[str, ...] = (
+    "da_onpk",
+    "load",
+    "temp",
+    "solar",
+    "wind",
+    "outages",
+    "m3",
+)
 
 
 def quantile_label(q: float) -> str:
@@ -160,14 +170,7 @@ def print_pool_funnel(
     day_type: str,
     hub: str,
 ) -> None:
-    """Render the candidate-pool funnel before distance computation.
-
-    Shows each filter stage that actually fired (raw → chronological →
-    excludes → recency → holiday → DOW → season), with surviving and
-    dropped counts. Relaxed filters (those that would have pushed the
-    pool below ``min_pool_size`` and were therefore reverted) are
-    flagged so the reader can see the fall-back.
-    """
+    """Render the candidate-pool funnel before distance computation."""
     target_dow = DAY_ABBR[target_date.weekday()]
     print_header("POOL FUNNEL", "=", 110)
     print(
@@ -222,13 +225,418 @@ def print_pool_funnel(
     print_divider("=", 110, dim=False)
 
 
-def print_analogs(analogs: pd.DataFrame, target_date: date, hub: str) -> None:
-    """Top analog days table.
+# ── analog-features helpers (ported from like_day_model_knn_sunny) ────────
 
-    The pjm_rto_hourly engine emits one analog row per (hour_ending, rank);
-    we aggregate to per-date for display: count of HEs the date appears
-    in, summed weight, mean distance.
+
+def _daily_features_long(pool: pd.DataFrame) -> pd.DataFrame:
+    """Per-date daily features from a long-format pool. Indexed by date."""
+    if pool is None or len(pool) == 0:
+        return pd.DataFrame()
+    grouped = pool.groupby("date", sort=True)
+    onpk_mask = pool["hour_ending"].between(8, 23, inclusive="both")
+    onpk = (
+        pool[onpk_mask].groupby("date")["lmp"].mean()
+        if "lmp" in pool.columns
+        else pd.Series(dtype=float)
+    )
+    out = pd.DataFrame(
+        {
+            "da_onpk": onpk,
+            "load": grouped["load_mw_at_hour"].max()
+            if "load_mw_at_hour" in pool.columns
+            else np.nan,
+            "temp": grouped["temp_at_hour"].mean()
+            if "temp_at_hour" in pool.columns
+            else np.nan,
+            "solar": grouped["solar_at_hour"].max()
+            if "solar_at_hour" in pool.columns
+            else np.nan,
+            "wind": grouped["wind_at_hour"].max()
+            if "wind_at_hour" in pool.columns
+            else np.nan,
+            "outages": grouped["outage_total_mw"].first()
+            if "outage_total_mw" in pool.columns
+            else np.nan,
+            "m3": grouped["gas_m3_daily_avg"].first()
+            if "gas_m3_daily_avg" in pool.columns
+            else np.nan,
+        }
+    )
+    return out
+
+
+def _daily_features_from_query(query: pd.DataFrame) -> dict[str, float | None]:
+    """Same daily features for the 24-row target query."""
+    if query is None or len(query) == 0:
+        return {k: None for k in _FEATURE_KEYS}
+
+    def _max(col: str) -> float | None:
+        if col not in query.columns:
+            return None
+        v = query[col].astype(float).dropna()
+        return float(v.max()) if len(v) else None
+
+    def _mean(col: str) -> float | None:
+        if col not in query.columns:
+            return None
+        v = query[col].astype(float).dropna()
+        return float(v.mean()) if len(v) else None
+
+    def _scalar(col: str) -> float | None:
+        if col not in query.columns:
+            return None
+        v = query[col].dropna()
+        return float(v.iloc[0]) if len(v) else None
+
+    return {
+        "da_onpk": None,
+        "load": _max("load_mw_at_hour"),
+        "temp": _mean("temp_at_hour"),
+        "solar": _max("solar_at_hour"),
+        "wind": _max("wind_at_hour"),
+        "outages": _scalar("outage_total_mw"),
+        "m3": _scalar("gas_m3_daily_avg"),
+    }
+
+
+def _pool_feature_stds_long(pool: pd.DataFrame) -> dict[str, float]:
+    daily = _daily_features_long(pool)
+    out: dict[str, float] = {}
+    for k in _FEATURE_KEYS:
+        if k not in daily.columns:
+            out[k] = 1.0
+            continue
+        s = float(np.nanstd(daily[k].to_numpy(dtype=float), ddof=0))
+        out[k] = s if s > 0 and not np.isnan(s) else 1.0
+    return out
+
+
+def _scalar_feature_he_z(
+    pool: pd.DataFrame,
+    query: pd.DataFrame,
+    feature_col: str,
+) -> dict[date, list[float | None]]:
+    """Per-HE z-distance for one scalar feature."""
+    if (
+        feature_col not in pool.columns
+        or feature_col not in query.columns
+        or len(query) == 0
+    ):
+        return {}
+
+    out: dict[date, list[float | None]] = {}
+    target_by_he = query.set_index("hour_ending")[feature_col].astype(float).to_dict()
+
+    for h in range(1, 25):
+        slice_pool = pool[pool["hour_ending"] == h]
+        if len(slice_pool) == 0:
+            continue
+        vals = slice_pool[feature_col].astype(float).to_numpy()
+        std = float(np.nanstd(vals)) if not np.all(np.isnan(vals)) else 1.0
+        if std == 0 or np.isnan(std):
+            std = 1.0
+        target_v = target_by_he.get(h)
+        if target_v is None or pd.isna(target_v):
+            continue
+        diffs = (vals - float(target_v)) / std
+        for d, z in zip(slice_pool["date"].tolist(), diffs):
+            arr = out.setdefault(d, [None] * 24)
+            arr[h - 1] = None if np.isnan(z) else float(z)
+    return out
+
+
+def _shade_z(z: float | None) -> str:
+    if z is None or (isinstance(z, float) and np.isnan(z)):
+        return "·"
+    a = abs(float(z))
+    if a < 0.25:
+        return "█"
+    if a < 0.50:
+        return "▓"
+    if a < 1.00:
+        return "▒"
+    if a < 2.00:
+        return "░"
+    return "·"
+
+
+def _he_strip_for_date(date_analogs: pd.DataFrame) -> tuple[str, int]:
+    by_he: dict[int, int] = {
+        int(r["hour_ending"]): int(r["rank"]) for _, r in date_analogs.iterrows()
+    }
+    chars: list[str] = []
+    for h in range(1, 25):
+        if h not in by_he:
+            chars.append("·")
+        else:
+            r = by_he[h]
+            chars.append("█" if r <= 5 else ("▓" if r <= 15 else "▒"))
+    return "".join(chars), len(by_he)
+
+
+def _fmt_num(
+    v: float | None, width: int, decimals: int = 0, comma: bool = False
+) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return f"{'-':>{width}}"
+    spec = f">{width},.{decimals}f" if comma else f">{width}.{decimals}f"
+    return f"{v:{spec}}"
+
+
+def _fmt_diff(
+    d: float | None,
+    total_width: int,
+    decimals: int = 0,
+    comma: bool = False,
+) -> str:
+    if d is None or (isinstance(d, float) and pd.isna(d)):
+        return " " * total_width
+    spec = f"+,.{decimals}f" if comma else f"+.{decimals}f"
+    body = f"({d:{spec}})".rjust(total_width)
+    if d > 0:
+        return f"{_HL_UP}{body}{_RS}"
+    if d < 0:
+        return f"{_HL_DOWN}{body}{_RS}"
+    return body
+
+
+def _fmt_sigma(z: float | None, width: int = 7) -> str:
+    if z is None or (isinstance(z, float) and pd.isna(z)):
+        return f"{'-':>{width}}"
+    body = f"{z:+.2f}".rjust(width)
+    if z > 0:
+        return f"{_HL_UP}{body}{_RS}"
+    if z < 0:
+        return f"{_HL_DOWN}{body}{_RS}"
+    return body
+
+
+def print_analog_features(
+    analogs: pd.DataFrame,
+    pool: pd.DataFrame,
+    query: pd.DataFrame,
+    target_date: date,
+    hub: str,
+    n_show: int = 20,
+) -> None:
+    """Combined daily-features + engine-view table for the active config.
+
+    Long-format pool: daily features are groupby(date) reducers (peak
+    load/solar/wind, scalar outages/m3, mean LMP HE8-23). Per-feature
+    sub-strips use scalar z per HE.
     """
+    target_dow = DAY_ABBR[target_date.weekday()]
+    print_header("LIKE-DAY ANALOGS - Daily Features + Engine View", "=", 230)
+    print(f"  Forecast: {target_date} ({target_dow})  |  Hub: {hub}")
+    print(
+        "  Each cell: value  (raw diff)  sigma-gap   (GREEN = analog higher, RED = lower)   "
+        "HE strip rank: full<=5  med<=15  light>15  dot=miss"
+    )
+    print(
+        "  Per-feature sub-rows |z|-shading:  full<0.25  med<0.50  light<1.0  faint<2.0  dot>=2 or n/a"
+    )
+    print_divider("=", 230, dim=False)
+
+    if analogs is None or len(analogs) == 0:
+        print("\n  (no analogs returned)")
+        return
+
+    by_date = analogs.groupby("date", as_index=False).agg(
+        summed_weight=("weight", "sum"),
+        mean_distance=("distance", "mean"),
+    )
+    total_w = float(by_date["summed_weight"].sum())
+    if total_w <= 0:
+        print("\n  (zero total weight)")
+        return
+    by_date["w"] = by_date["summed_weight"] / total_w
+    by_date = by_date.sort_values("w", ascending=False).reset_index(drop=True)
+
+    daily_pool = _daily_features_long(pool)
+    rows_features: list[dict] = []
+    for idx, r in by_date.iterrows():
+        d = r["date"]
+        if d in daily_pool.index:
+            feats = {
+                k: float(daily_pool.loc[d, k])
+                if pd.notna(daily_pool.loc[d, k])
+                else None
+                for k in _FEATURE_KEYS
+            }
+        else:
+            feats = {k: None for k in _FEATURE_KEYS}
+        feats["date"] = d
+        feats["rank"] = int(idx) + 1
+        feats["mean_distance"] = float(r["mean_distance"])
+        feats["summed_weight"] = float(r["summed_weight"])
+        feats["w"] = float(r["w"])
+        rows_features.append(feats)
+
+    avg: dict[str, float | None] = {}
+    for k in _FEATURE_KEYS:
+        wsum = 0.0
+        wseen = 0.0
+        for r in rows_features:
+            if r[k] is not None:
+                wsum += r[k] * r["w"]
+                wseen += r["w"]
+        avg[k] = (wsum / wseen) if wseen > 0 else None
+
+    target_feats = _daily_features_from_query(query)
+    if target_feats["da_onpk"] is None and target_date in daily_pool.index:
+        v = daily_pool.loc[target_date, "da_onpk"]
+        target_feats["da_onpk"] = float(v) if pd.notna(v) else None
+
+    stds = _pool_feature_stds_long(pool)
+
+    _COLS = (
+        ("da_onpk", "DA OnPk", "($/MWh)", 8, 8, 2, False),
+        ("load", "Load", "(MW)", 9, 9, 0, True),
+        ("temp", "Temp", "(F)", 7, 7, 1, False),
+        ("solar", "Solar", "(MW)", 9, 9, 0, True),
+        ("wind", "Wind", "(MW)", 9, 9, 0, True),
+        ("outages", "Outages", "(MW)", 9, 9, 0, True),
+        ("m3", "M3", "($)", 6, 7, 2, False),
+    )
+    SIGMA_W = 6
+
+    _PREFIX = f"  {'rank':>4} {'Like Date':<22} {'mean_d':>7} {'sum_w':>7} {'w':>6}"
+    _PREFIX_UNITS = f"  {'':>4} {'':<22} {'':>7} {'':>7} {'':>6}"
+    head_parts = [_PREFIX]
+    unit_parts = [_PREFIX_UNITS]
+    for _, label, units, vw, dw, _, _ in _COLS:
+        cell_w = vw + 1 + dw + 1 + SIGMA_W
+        head_parts.append(f"{label:^{cell_w}}")
+        unit_parts.append(f"{units:^{cell_w}}")
+    head_parts.append(f"{'HEs':>4}")
+    unit_parts.append(f"{'/24':>4}")
+    header = "  ".join(head_parts)
+    units_row = "  ".join(unit_parts)
+    sep = "-" * len(header)
+
+    print()
+    print(header)
+    print(units_row)
+    print(sep)
+
+    def _fmt_row(
+        rank_str: str,
+        label: str,
+        mean_d_str: str,
+        sum_w_str: str,
+        w_str: str,
+        f: dict,
+        target: dict | None,
+        n_hours_str: str,
+    ) -> str:
+        parts = [
+            f"  {rank_str:>4} {label:<22} {mean_d_str:>7} {sum_w_str:>7} {w_str:>6}"
+        ]
+        for key, _, _, vw, dw, decimals, comma in _COLS:
+            val_str = _fmt_num(f[key], vw, decimals, comma=comma)
+            if target is None:
+                diff_str = " " * dw
+                sigma_str = f"{'ref':>{SIGMA_W}}"
+            elif f[key] is None or target[key] is None:
+                diff_str = " " * dw
+                sigma_str = f"{'-':>{SIGMA_W}}"
+            else:
+                diff = f[key] - target[key]
+                diff_str = _fmt_diff(diff, dw, decimals, comma=comma)
+                z = diff / stds[key]
+                sigma_str = _fmt_sigma(z, SIGMA_W)
+            parts.append(f"{val_str} {diff_str} {sigma_str}")
+        parts.append(f"{n_hours_str:>4}")
+        return "  ".join(parts)
+
+    _SUB_PREFIXES: tuple[str, ...] = ("load", "temp", "solar", "wind")
+    _SUB_TO_COL = {
+        "load": "load_mw_at_hour",
+        "temp": "temp_at_hour",
+        "solar": "solar_at_hour",
+        "wind": "wind_at_hour",
+    }
+    sub_z_by_feat: dict[str, dict] = {
+        prefix: _scalar_feature_he_z(pool, query, _SUB_TO_COL[prefix])
+        for prefix in _SUB_PREFIXES
+    }
+
+    def _print_sub_strips(d, feats: dict) -> None:
+        parts = [_PREFIX_UNITS]
+        sub_strips: dict[str, str] = {
+            prefix: "".join(
+                _shade_z(z) for z in sub_z_by_feat[prefix].get(d, [None] * 24)
+            )
+            for prefix in _SUB_PREFIXES
+        }
+        date_an = analogs[analogs["date"] == d]
+        sub_strips["da_onpk"], _ = _he_strip_for_date(date_an)
+        for key in ("outages", "m3"):
+            if (
+                feats[key] is not None
+                and target_feats[key] is not None
+                and stds[key] > 0
+            ):
+                z = (feats[key] - target_feats[key]) / stds[key]
+                sub_strips[key] = _shade_z(z) * 24
+            else:
+                sub_strips[key] = "·" * 24
+        for key, _, _, vw, dw, _, _ in _COLS:
+            cell_w = vw + 1 + dw + 1 + SIGMA_W
+            content = sub_strips.get(key, "")
+            parts.append(f"{content:^{cell_w}}")
+        print("  ".join(parts))
+
+    print(_fmt_row("-", "TARGET", "-", "-", "-", target_feats, None, "-"))
+    print(sep)
+    n_displayed = min(n_show, len(rows_features))
+    for i, r in enumerate(rows_features[:n_show]):
+        d_str = pd.Timestamp(r["date"]).strftime("%a %b-%d %Y")
+        date_an = analogs[analogs["date"] == r["date"]]
+        _, n_hours = _he_strip_for_date(date_an)
+        print(
+            _fmt_row(
+                str(r["rank"]),
+                d_str,
+                f"{r['mean_distance']:.4f}",
+                f"{r['summed_weight']:.4f}",
+                f"{r['w']:.3f}",
+                r,
+                target_feats,
+                str(n_hours),
+            )
+        )
+        _print_sub_strips(r["date"], r)
+        if i < n_displayed - 1:
+            print()
+    print(sep)
+    print(
+        _fmt_row(
+            "-",
+            "Like-Day Avg (wtd)",
+            "-",
+            f"{total_w:.4f}",
+            "1.000",
+            avg,
+            target_feats,
+            "-",
+        )
+    )
+    print(sep)
+
+    n_dates = len(rows_features)
+    shown_w = sum(r["w"] for r in rows_features[: min(n_show, n_dates)])
+    print(
+        f"\n  Showing top {min(n_show, n_dates)} of {n_dates} unique analog dates  "
+        f"|  Top-{n_show} weight share: {shown_w:.1%}  "
+        f"|  sigma-gap = (analog - target) / pool_std  "
+        f"|  Like-Day Avg uses all {n_dates} dates"
+    )
+
+
+def print_analogs(analogs: pd.DataFrame, target_date: date, hub: str) -> None:
+    """Top analog days table (simple aggregated view, kept for callers
+    that don't need the daily-feature comparison."""
     target_dow = DAY_ABBR[target_date.weekday()]
     print("\n" + "=" * 90)
     print("  LIKE-DAY ANALOG DAYS (aggregated across HEs)")
@@ -331,7 +739,7 @@ def print_forecast(table: pd.DataFrame, metrics: dict | None) -> None:
 
 
 def print_quantiles(table: pd.DataFrame) -> None:
-    """Quantile bands table (P25 / P37.5 / P50 / Forecast / P62.5 / P75)."""
+    """Quantile bands table."""
     print("  Quantile Bands ($/MWh)")
     print("-" * 100)
 
