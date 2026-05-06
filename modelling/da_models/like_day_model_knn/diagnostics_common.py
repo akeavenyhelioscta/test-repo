@@ -11,6 +11,7 @@ The helpers are split into:
     figures): operate on a forecast_table that's identical in shape across
     all three models.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -21,13 +22,11 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from da_models.like_day_model_knn import configs
 
 Section = tuple[str, Any, str | None]
 
 PLOTLY_TEMPLATE = "plotly_dark"
 HOURS = list(range(1, 25))
-LMP_COLS = [f"lmp_h{h}" for h in HOURS]
 COLOR_TARGET = "#8dd9ff"
 COLOR_FORECAST = "#f87171"
 COLOR_ACTUAL = "#34d399"
@@ -35,8 +34,16 @@ COLOR_ANALOG = "#60a5fa"
 COLOR_ERROR = "#f59e0b"
 
 _YEAR_PALETTE = [
-    "#60a5fa", "#34d399", "#f59e0b", "#f87171", "#a78bfa",
-    "#22d3ee", "#f472b6", "#facc15", "#84cc16", "#fb923c",
+    "#60a5fa",
+    "#34d399",
+    "#f59e0b",
+    "#f87171",
+    "#a78bfa",
+    "#22d3ee",
+    "#f472b6",
+    "#facc15",
+    "#84cc16",
+    "#fb923c",
 ]
 
 
@@ -56,23 +63,34 @@ def hourly_load_table(target_date: date, hourly_rto: pd.DataFrame) -> pd.DataFra
 def hourly_values_fig(df: pd.DataFrame) -> go.Figure:
     """Hourly load + ramp, with daily summary features overlaid."""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Scatter(
-        x=df["hour_ending"], y=df["forecast_load_mw"],
-        mode="lines+markers", name="Forecast load",
-        line=dict(color=COLOR_TARGET, width=2.5),
-        hovertemplate="HE %{x}<br>%{y:,.0f} MW<extra></extra>",
-    ), secondary_y=False)
+    fig.add_trace(
+        go.Scatter(
+            x=df["hour_ending"],
+            y=df["forecast_load_mw"],
+            mode="lines+markers",
+            name="Forecast load",
+            line=dict(color=COLOR_TARGET, width=2.5),
+            hovertemplate="HE %{x}<br>%{y:,.0f} MW<extra></extra>",
+        ),
+        secondary_y=False,
+    )
 
     ramp = df["ramp_mw"].fillna(-np.inf) if len(df) else pd.Series(dtype=float)
     ramp_max_idx = int(ramp.idxmax()) if len(ramp) and ramp.notna().any() else None
     bar_colors = [COLOR_ERROR] * len(df)
     if ramp_max_idx is not None and 0 <= ramp_max_idx < len(bar_colors):
         bar_colors[ramp_max_idx] = "#ef4444"
-    fig.add_trace(go.Bar(
-        x=df["hour_ending"], y=df["ramp_mw"],
-        name="Hourly ramp", marker_color=bar_colors, opacity=0.55,
-        hovertemplate="HE %{x}<br>Ramp %{y:+,.0f} MW<extra></extra>",
-    ), secondary_y=True)
+    fig.add_trace(
+        go.Bar(
+            x=df["hour_ending"],
+            y=df["ramp_mw"],
+            name="Hourly ramp",
+            marker_color=bar_colors,
+            opacity=0.55,
+            hovertemplate="HE %{x}<br>Ramp %{y:+,.0f} MW<extra></extra>",
+        ),
+        secondary_y=True,
+    )
 
     if len(df) and df["forecast_load_mw"].notna().any():
         load = df["forecast_load_mw"]
@@ -81,16 +99,28 @@ def hourly_values_fig(df: pd.DataFrame) -> go.Figure:
         valley_pos = int(load.idxmin())
         for y, name, dash in [
             (float(load.mean()), f"daily_avg {load.mean():,.0f}", "dot"),
-            (float(load.iloc[peak_pos]),
-             f"daily_peak {load.iloc[peak_pos]:,.0f} (HE{int(he.iloc[peak_pos])})", "dash"),
-            (float(load.iloc[valley_pos]),
-             f"daily_valley {load.iloc[valley_pos]:,.0f} (HE{int(he.iloc[valley_pos])})", "dash"),
+            (
+                float(load.iloc[peak_pos]),
+                f"daily_peak {load.iloc[peak_pos]:,.0f} (HE{int(he.iloc[peak_pos])})",
+                "dash",
+            ),
+            (
+                float(load.iloc[valley_pos]),
+                f"daily_valley {load.iloc[valley_pos]:,.0f} (HE{int(he.iloc[valley_pos])})",
+                "dash",
+            ),
         ]:
-            fig.add_trace(go.Scatter(
-                x=[1, 24], y=[y, y], mode="lines",
-                name=name, line=dict(color="#9ca3af", width=1, dash=dash),
-                hoverinfo="skip",
-            ), secondary_y=False)
+            fig.add_trace(
+                go.Scatter(
+                    x=[1, 24],
+                    y=[y, y],
+                    mode="lines",
+                    name=name,
+                    line=dict(color="#9ca3af", width=1, dash=dash),
+                    hoverinfo="skip",
+                ),
+                secondary_y=False,
+            )
 
         def _ramp_segment(h_start: int, h_end: int, label: str, color: str) -> None:
             a = df.loc[df["hour_ending"] == h_start, "forecast_load_mw"]
@@ -99,23 +129,30 @@ def hourly_values_fig(df: pd.DataFrame) -> go.Figure:
                 return
             y0, y1 = float(a.iloc[0]), float(b.iloc[0])
             delta = y1 - y0
-            fig.add_trace(go.Scatter(
-                x=[h_start, h_end], y=[y0, y1],
-                mode="lines+markers+text",
-                name=f"{label} {delta:+,.0f}",
-                text=["", f"Δ {delta:+,.0f}"], textposition="top center",
-                line=dict(color=color, width=3),
-                marker=dict(size=8, color=color),
-                hovertemplate=f"{label}<br>HE %{{x}}: %{{y:,.0f}} MW<extra></extra>",
-            ), secondary_y=False)
+            fig.add_trace(
+                go.Scatter(
+                    x=[h_start, h_end],
+                    y=[y0, y1],
+                    mode="lines+markers+text",
+                    name=f"{label} {delta:+,.0f}",
+                    text=["", f"Δ {delta:+,.0f}"],
+                    textposition="top center",
+                    line=dict(color=color, width=3),
+                    marker=dict(size=8, color=color),
+                    hovertemplate=f"{label}<br>HE %{{x}}: %{{y:,.0f}} MW<extra></extra>",
+                ),
+                secondary_y=False,
+            )
 
         _ramp_segment(5, 8, "morning_ramp", "#22d3ee")
         _ramp_segment(15, 20, "evening_ramp", "#f472b6")
 
     fig.update_layout(
         title="Hourly load forecast with daily features overlaid",
-        template=PLOTLY_TEMPLATE, height=460,
-        margin=dict(l=60, r=60, t=60, b=60), hovermode="x unified",
+        template=PLOTLY_TEMPLATE,
+        height=460,
+        margin=dict(l=60, r=60, t=60, b=60),
+        hovermode="x unified",
     )
     fig.update_xaxes(title_text="Hour Ending", dtick=1, range=[0.5, 24.5])
     fig.update_yaxes(title_text="MW", secondary_y=False)
@@ -143,24 +180,34 @@ def analog_weights_fig_day(analogs: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     for year in years:
         part = df[df["year"] == year]
-        fig.add_trace(go.Bar(
-            x=part["weight_pct"], y=part["label"], orientation="h",
-            marker_color=color_map[year], name=str(year),
-            text=[f"{w:.2f}% (rank #{r})" for w, r in zip(part["weight_pct"], part["rank"])],
-            textposition="outside",
-            customdata=np.stack(
-                [part["rank"].to_numpy(), part["distance"].to_numpy()], axis=-1,
-            ),
-            hovertemplate=(
-                "%{y}<br>weight=%{x:.2f}%<br>"
-                "rank=#%{customdata[0]}<br>distance=%{customdata[1]:.4f}<extra></extra>"
-            ),
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=part["weight_pct"],
+                y=part["label"],
+                orientation="h",
+                marker_color=color_map[year],
+                name=str(year),
+                text=[
+                    f"{w:.2f}% (rank #{r})"
+                    for w, r in zip(part["weight_pct"], part["rank"])
+                ],
+                textposition="outside",
+                customdata=np.stack(
+                    [part["rank"].to_numpy(), part["distance"].to_numpy()],
+                    axis=-1,
+                ),
+                hovertemplate=(
+                    "%{y}<br>weight=%{x:.2f}%<br>"
+                    "rank=#%{customdata[0]}<br>distance=%{customdata[1]:.4f}<extra></extra>"
+                ),
+            )
+        )
     fig.update_layout(
         title="Selected analogs: weight by analog day (color = year)",
         template=PLOTLY_TEMPLATE,
         height=max(360, 26 * len(df) + 160),
-        margin=dict(l=170, r=80, t=60, b=60), bargap=0.25,
+        margin=dict(l=170, r=80, t=60, b=60),
+        bargap=0.25,
         legend=dict(title="Year"),
     )
     fig.update_xaxes(title_text="Analog weight (%)")
@@ -173,7 +220,9 @@ def analog_weights_fig_day(analogs: pd.DataFrame) -> go.Figure:
 
 
 def analog_load_overlay_fig_day(
-    analogs: pd.DataFrame, target_date: date, hourly_rto: pd.DataFrame,
+    analogs: pd.DataFrame,
+    target_date: date,
+    hourly_rto: pd.DataFrame,
 ) -> go.Figure:
     """Hourly load curves: target day vs each selected analog (width/opacity ~ weight)."""
     fig = go.Figure()
@@ -182,7 +231,9 @@ def analog_load_overlay_fig_day(
 
     for _, row in analogs.sort_values("weight", ascending=True).iterrows():
         analog_date = pd.to_datetime(row["date"]).date()
-        analog_df = hourly_rto[hourly_rto["date"] == analog_date].sort_values("hour_ending")
+        analog_df = hourly_rto[hourly_rto["date"] == analog_date].sort_values(
+            "hour_ending"
+        )
         if len(analog_df) == 0:
             continue
         w = float(row["weight"])
@@ -191,29 +242,38 @@ def analog_load_overlay_fig_day(
         width = 0.8 + 3.7 * w_norm
         rank = int(row["rank"])
         label = pd.to_datetime(row["date"]).strftime("%a %Y-%m-%d")
-        fig.add_trace(go.Scatter(
-            x=analog_df["hour_ending"], y=analog_df["forecast_load_mw"],
-            mode="lines",
-            name=f"#{rank} {label} ({w * 100:.1f}%)",
-            line=dict(color=COLOR_ANALOG, width=width),
-            opacity=opacity,
-            hovertemplate=f"#{rank} {label}<br>HE %{{x}}: %{{y:,.0f}} MW<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=analog_df["hour_ending"],
+                y=analog_df["forecast_load_mw"],
+                mode="lines",
+                name=f"#{rank} {label} ({w * 100:.1f}%)",
+                line=dict(color=COLOR_ANALOG, width=width),
+                opacity=opacity,
+                hovertemplate=f"#{rank} {label}<br>HE %{{x}}: %{{y:,.0f}} MW<extra></extra>",
+            )
+        )
 
     target_df = hourly_rto[hourly_rto["date"] == target_date].sort_values("hour_ending")
     if len(target_df):
-        fig.add_trace(go.Scatter(
-            x=target_df["hour_ending"], y=target_df["forecast_load_mw"],
-            mode="lines+markers", name=f"Target {target_date}",
-            line=dict(color=COLOR_TARGET, width=4),
-            marker=dict(size=7),
-            hovertemplate=f"Target {target_date}<br>HE %{{x}}: %{{y:,.0f}} MW<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=target_df["hour_ending"],
+                y=target_df["forecast_load_mw"],
+                mode="lines+markers",
+                name=f"Target {target_date}",
+                line=dict(color=COLOR_TARGET, width=4),
+                marker=dict(size=7),
+                hovertemplate=f"Target {target_date}<br>HE %{{x}}: %{{y:,.0f}} MW<extra></extra>",
+            )
+        )
 
     fig.update_layout(
         title="Analog load curves vs target (line width / opacity proportional to analog weight)",
-        template=PLOTLY_TEMPLATE, height=480,
-        margin=dict(l=60, r=40, t=60, b=60), hovermode="x unified",
+        template=PLOTLY_TEMPLATE,
+        height=480,
+        margin=dict(l=60, r=40, t=60, b=60),
+        hovermode="x unified",
     )
     fig.update_xaxes(title_text="Hour Ending", dtick=1, range=[0.5, 24.5])
     fig.update_yaxes(title_text="MW")
@@ -237,21 +297,29 @@ def analog_picks_heatmap_hour(analogs: pd.DataFrame) -> go.Figure:
     df["date_label"] = pd.to_datetime(df["date"]).dt.strftime("%a %Y-%m-%d")
 
     pivot_w = df.pivot_table(
-        index="hour_ending", columns="rank", values="weight_pct", aggfunc="first",
+        index="hour_ending",
+        columns="rank",
+        values="weight_pct",
+        aggfunc="first",
     ).sort_index()
     pivot_d = df.pivot_table(
-        index="hour_ending", columns="rank", values="date_label", aggfunc="first",
+        index="hour_ending",
+        columns="rank",
+        values="date_label",
+        aggfunc="first",
     ).reindex(index=pivot_w.index, columns=pivot_w.columns)
 
-    fig = go.Figure(data=go.Heatmap(
-        z=pivot_w.to_numpy(dtype=float),
-        x=[f"#{int(c)}" for c in pivot_w.columns],
-        y=[f"HE{int(h)}" for h in pivot_w.index],
-        colorscale="Viridis",
-        colorbar=dict(title="Weight (%)"),
-        customdata=pivot_d.to_numpy(),
-        hovertemplate="%{y} %{x}<br>%{customdata}<br>weight=%{z:.2f}%<extra></extra>",
-    ))
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=pivot_w.to_numpy(dtype=float),
+            x=[f"#{int(c)}" for c in pivot_w.columns],
+            y=[f"HE{int(h)}" for h in pivot_w.index],
+            colorscale="Viridis",
+            colorbar=dict(title="Weight (%)"),
+            customdata=pivot_d.to_numpy(),
+            hovertemplate="%{y} %{x}<br>%{customdata}<br>weight=%{z:.2f}%<extra></extra>",
+        )
+    )
     fig.update_layout(
         title="pjm_rto_hourly analog picks: rank × HE (color = weight %, hover = analog date)",
         template=PLOTLY_TEMPLATE,
@@ -274,24 +342,25 @@ def analog_date_frequency_fig_hour(analogs: pd.DataFrame) -> go.Figure:
     df["date_str"] = pd.to_datetime(df["date"]).dt.strftime("%a %Y-%m-%d")
     summary = (
         df.groupby("date_str")
-          .agg(n_hours=("hour_ending", "nunique"),
-               total_weight=("weight", "sum"))
-          .reset_index()
-          .sort_values("total_weight", ascending=True)
+        .agg(n_hours=("hour_ending", "nunique"), total_weight=("weight", "sum"))
+        .reset_index()
+        .sort_values("total_weight", ascending=True)
     )
-    fig = go.Figure(go.Bar(
-        x=summary["total_weight"] * 100.0,
-        y=summary["date_str"],
-        orientation="h",
-        marker_color=COLOR_ANALOG,
-        text=[f"{n} HEs" for n in summary["n_hours"]],
-        textposition="outside",
-        customdata=summary["n_hours"].to_numpy(),
-        hovertemplate=(
-            "%{y}<br>summed weight=%{x:.2f}%<br>"
-            "appeared in %{customdata} HEs<extra></extra>"
-        ),
-    ))
+    fig = go.Figure(
+        go.Bar(
+            x=summary["total_weight"] * 100.0,
+            y=summary["date_str"],
+            orientation="h",
+            marker_color=COLOR_ANALOG,
+            text=[f"{n} HEs" for n in summary["n_hours"]],
+            textposition="outside",
+            customdata=summary["n_hours"].to_numpy(),
+            hovertemplate=(
+                "%{y}<br>summed weight=%{x:.2f}%<br>"
+                "appeared in %{customdata} HEs<extra></extra>"
+            ),
+        )
+    )
     fig.update_layout(
         title="pjm_rto_hourly analog date frequency: summed weight (across all HEs) per candidate date",
         template=PLOTLY_TEMPLATE,
@@ -332,39 +401,59 @@ def forecast_fig(forecast_table: pd.DataFrame, hub: str) -> go.Figure:
     """Actual + point forecast + P10-P90 band per HE."""
     fig = go.Figure()
     if "q_0.10" in forecast_table.columns and "q_0.90" in forecast_table.columns:
-        fig.add_trace(go.Scatter(
-            x=forecast_table["hour_ending"], y=forecast_table["q_0.90"],
-            mode="lines", line=dict(color="#a78bfa", width=0),
-            showlegend=False, hoverinfo="skip",
-        ))
-        fig.add_trace(go.Scatter(
-            x=forecast_table["hour_ending"], y=forecast_table["q_0.10"],
-            mode="lines", line=dict(color="#a78bfa", width=0),
-            fill="tonexty", fillcolor="rgba(167,139,250,0.20)",
-            name="P10-P90",
-            hovertemplate="P10 %{y:.2f}<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=forecast_table["hour_ending"],
+                y=forecast_table["q_0.90"],
+                mode="lines",
+                line=dict(color="#a78bfa", width=0),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=forecast_table["hour_ending"],
+                y=forecast_table["q_0.10"],
+                mode="lines",
+                line=dict(color="#a78bfa", width=0),
+                fill="tonexty",
+                fillcolor="rgba(167,139,250,0.20)",
+                name="P10-P90",
+                hovertemplate="P10 %{y:.2f}<extra></extra>",
+            )
+        )
 
-    fig.add_trace(go.Scatter(
-        x=forecast_table["hour_ending"], y=forecast_table["point_forecast"],
-        mode="lines+markers", name="Forecast",
-        line=dict(color=COLOR_FORECAST, width=2.8, dash="dash"),
-        marker=dict(size=5),
-        hovertemplate="Forecast<br>HE %{x}: $%{y:.2f}/MWh<extra></extra>",
-    ))
-    if forecast_table["actual_lmp"].notna().any():
-        fig.add_trace(go.Scatter(
-            x=forecast_table["hour_ending"], y=forecast_table["actual_lmp"],
-            mode="lines+markers", name="Actual",
-            line=dict(color=COLOR_ACTUAL, width=2.8),
+    fig.add_trace(
+        go.Scatter(
+            x=forecast_table["hour_ending"],
+            y=forecast_table["point_forecast"],
+            mode="lines+markers",
+            name="Forecast",
+            line=dict(color=COLOR_FORECAST, width=2.8, dash="dash"),
             marker=dict(size=5),
-            hovertemplate="Actual<br>HE %{x}: $%{y:.2f}/MWh<extra></extra>",
-        ))
+            hovertemplate="Forecast<br>HE %{x}: $%{y:.2f}/MWh<extra></extra>",
+        )
+    )
+    if forecast_table["actual_lmp"].notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=forecast_table["hour_ending"],
+                y=forecast_table["actual_lmp"],
+                mode="lines+markers",
+                name="Actual",
+                line=dict(color=COLOR_ACTUAL, width=2.8),
+                marker=dict(size=5),
+                hovertemplate="Actual<br>HE %{x}: $%{y:.2f}/MWh<extra></extra>",
+            )
+        )
 
     fig.update_layout(
         title=f"Hourly forecast verification: {hub} DA LMP",
-        template=PLOTLY_TEMPLATE, height=480,
-        margin=dict(l=60, r=40, t=60, b=60), hovermode="x unified",
+        template=PLOTLY_TEMPLATE,
+        height=480,
+        margin=dict(l=60, r=40, t=60, b=60),
+        hovermode="x unified",
     )
     fig.update_xaxes(title_text="Hour Ending", dtick=1, range=[0.5, 24.5])
     fig.update_yaxes(title_text="$/MWh")
@@ -374,22 +463,33 @@ def forecast_fig(forecast_table: pd.DataFrame, hub: str) -> go.Figure:
 def hourly_error_fig(forecast_table: pd.DataFrame) -> go.Figure:
     """Signed error bars + abs error line."""
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=forecast_table["hour_ending"], y=forecast_table["error"],
-        name="Error forecast minus actual",
-        marker_color=np.where(forecast_table["error"].fillna(0) >= 0, "#f87171", "#60a5fa"),
-        hovertemplate="HE %{x}<br>Error $%{y:+.2f}/MWh<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=forecast_table["hour_ending"], y=forecast_table["abs_error"],
-        mode="lines+markers", name="Abs error",
-        line=dict(color=COLOR_ERROR, width=2),
-        hovertemplate="HE %{x}<br>Abs error $%{y:.2f}/MWh<extra></extra>",
-    ))
+    fig.add_trace(
+        go.Bar(
+            x=forecast_table["hour_ending"],
+            y=forecast_table["error"],
+            name="Error forecast minus actual",
+            marker_color=np.where(
+                forecast_table["error"].fillna(0) >= 0, "#f87171", "#60a5fa"
+            ),
+            hovertemplate="HE %{x}<br>Error $%{y:+.2f}/MWh<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=forecast_table["hour_ending"],
+            y=forecast_table["abs_error"],
+            mode="lines+markers",
+            name="Abs error",
+            line=dict(color=COLOR_ERROR, width=2),
+            hovertemplate="HE %{x}<br>Abs error $%{y:.2f}/MWh<extra></extra>",
+        )
+    )
     fig.update_layout(
         title="Hourly miss verification: forecast error by hour",
-        template=PLOTLY_TEMPLATE, height=420,
-        margin=dict(l=60, r=40, t=60, b=60), hovermode="x unified",
+        template=PLOTLY_TEMPLATE,
+        height=420,
+        margin=dict(l=60, r=40, t=60, b=60),
+        hovermode="x unified",
     )
     fig.update_xaxes(title_text="Hour Ending", dtick=1, range=[0.5, 24.5])
     fig.update_yaxes(title_text="$/MWh")
@@ -406,9 +506,7 @@ def summary_html(
     hub: str,
     season_window_days: int,
 ) -> str:
-    has_actuals = (
-        len(forecast_table) > 0 and forecast_table["actual_lmp"].notna().any()
-    )
+    has_actuals = len(forecast_table) > 0 and forecast_table["actual_lmp"].notna().any()
     if has_actuals:
         mae = float(forecast_table["abs_error"].mean())
         rmse = float(np.sqrt((forecast_table["error"] ** 2).mean()))
@@ -447,7 +545,8 @@ def summary_html(
 def _metric(label: str, value: str, subvalue: str = "") -> str:
     sub = (
         f"<div style='font-size:11px;color:#6f8db1;margin-top:2px;'>{subvalue}</div>"
-        if subvalue else ""
+        if subvalue
+        else ""
     )
     return (
         "<div style='background:#111d31;border:1px solid #253b59;border-radius:6px;padding:10px;'>"

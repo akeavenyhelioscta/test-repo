@@ -473,7 +473,7 @@ def _per_date_summary(analogs: pd.DataFrame) -> pd.DataFrame:
 
     Engine emits one analog row per (hour_ending, rank) — same date can
     appear in many HEs. Per-date weight is the sum across HEs; that's the
-    same aggregation ``print_analog_features`` uses.
+    same aggregation ``print_analogs`` uses for its top-N display.
     """
     if analogs is None or len(analogs) == 0:
         return pd.DataFrame(

@@ -21,13 +21,17 @@ any kwarg accepted by ``forecast_single_day.run()`` — most usefully:
     season_window_days  (default 60)
     min_pool_size       (default 100)
 
-Valid weight keys (from ``PJM_RTO_HOURLY_SPEC.feature_groups``):
+Valid weight keys (from
+``PJM_RTO_HOURLY_SUNNY_ALIGNED_SPEC.feature_groups``):
 
-    load_level, solar_level, wind_level, outage_level, gas_level
+    load_level, load_ramps, renewable_level, net_load_level,
+    temp_level, outage_level, gas_level, calendar_level
 
-The five ``load_*`` time-of-day sub-groups were collapsed into a single
-``load_level`` group — per-HE windowed matching already localizes the
-match, so spec-side bucketing was redundant.
+T4 long-pool change: solar and wind were collapsed into a single
+``renewable_level`` group (their per-HE z-distances are nearly identical
+on this pool, and combining lets the engine match on total renewable
+shape rather than each component independently). Pre-T4 specs had
+separate ``solar_level``/``wind_level`` keys — those are gone.
 
 Unknown weight keys raise ``ValueError`` with the valid-keys list, so
 typos surface immediately rather than silently zeroing a group.
@@ -48,41 +52,48 @@ SCENARIOS: dict[str, dict] = {
         "weights": None,
         "overrides": {},
     },
-    # Heavy-load scenario: bias selection toward load similarity. After
-    # the time-of-day bucket collapse, this is one knob (was five). Raw
-    # 13.5 = sum of the prior heavy_load_peak sub-bucket weights.
+    # Heavy-load scenario: bias selection toward load similarity. Sum of
+    # the prior heavy_load_peak load sub-buckets carried forward as the
+    # single load_level weight.
     "heavy_load_peak": {
         "weights": {
             "load_level": 13.5,
-            "solar_level": 0.5,
-            "wind_level": 0.5,
+            "load_ramps": 1.0,
+            "renewable_level": 1.0,
+            "net_load_level": 1.0,
+            "temp_level": 1.0,
             "outage_level": 1.0,
             "gas_level": 0.5,
+            "calendar_level": 0.5,
         },
         "overrides": {},
     },
-    # The OLD spec defaults (pre-2026-05-04). Kept as an ablation so
-    # backtests can compare the current `default` against the prior
-    # weights. Raw 10.0 = sum of the prior previous_default load buckets.
+    # OLD spec defaults (pre-2026-05-04). Kept as an ablation so backtests
+    # can compare the current ``default`` against the prior weight mix.
     "previous_default": {
         "weights": {
             "load_level": 10.0,
-            "solar_level": 1.5,
-            "wind_level": 1.5,
+            "load_ramps": 1.0,
+            "renewable_level": 3.0,
+            "net_load_level": 1.0,
+            "temp_level": 1.0,
             "outage_level": 2.0,
             "gas_level": 1.0,
+            "calendar_level": 0.5,
         },
         "overrides": {},
     },
-    # Renewable-heavy: down-weights load and bumps solar/wind. Raw 4.75
-    # = sum of the prior renewables_first load buckets.
+    # Renewable-heavy: down-weights load and bumps the renewable group.
     "renewables_first": {
         "weights": {
             "load_level": 4.75,
-            "solar_level": 4.0,
-            "wind_level": 4.0,
+            "load_ramps": 1.0,
+            "renewable_level": 8.0,
+            "net_load_level": 2.0,
+            "temp_level": 1.0,
             "outage_level": 2.0,
             "gas_level": 1.0,
+            "calendar_level": 0.5,
         },
         "overrides": {},
     },

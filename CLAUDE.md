@@ -28,8 +28,12 @@ lift it to `common/`.
   - `common/forecast/output.py` — display helpers
     (`actuals_from_pool`, `add_summary_cols`, `build_output_table`).
 - `modelling/da_models/like_day_model_knn/` — KNN analog forecaster.
-  Variant subpackage: `pjm_rto_hourly/` (3-hour window per target HE,
-  per-hour matching).
+  Variant subpackage: `pjm_rto_hourly/` (long-format pool, one row per
+  `(date, hour_ending)`, per-HE scalar matching — sunny-aligned). The
+  pre-T4 `flt_radius`-windowed wide pool is gone; `actuals_from_pool`
+  and the spec's `feature_groups` reference scalar long col names
+  (`load_mw_at_hour`, `solar_at_hour`, `lmp`, etc., catalogued in
+  `domains.HOURLY_STEM_TO_LONG_COL`).
 - `modelling/da_models/naive_baselines/` — literature-canonical
   reference forecasters (EPF naive per Lago/Nogales/Conejo, pure d-7).
   Used as the rMAE denominator for richer models.

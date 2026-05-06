@@ -54,7 +54,6 @@ from da_models.like_day_model_knn.pjm_rto_hourly.forecast import (  # noqa: E402
 )
 from da_models.like_day_model_knn.pjm_rto_hourly.metrics import evaluate_forecast  # noqa: E402
 from da_models.like_day_model_knn.pjm_rto_hourly.printers import (  # noqa: E402
-    print_analog_features,
     print_config,
     print_forecast,
     print_pool_funnel,
@@ -263,14 +262,6 @@ def run(
     if not quiet:
         print_config(config, spec, resolved_date, day_type)
         print_pool_funnel(funnel, resolved_date, day_type, config.hub)
-        print_analog_features(
-            analogs,
-            pool,
-            query,
-            resolved_date,
-            config.hub,
-            flt_radius=spec.flt_radius,
-        )
         print_forecast(output_table, metrics if metrics else None)
         print_quantiles(quantiles_table)
 
