@@ -36,3 +36,9 @@ sources:
         description: "PJM SOUTH wind power generation forecast (hourly, Meteologica)."
       - name: usa_pjm_west_wind_power_generation_forecast_hourly
         description: "PJM WEST wind power generation forecast (hourly, Meteologica)."
+
+      # PJM Western-Hub day-ahead price forecast (hourly)
+      - name: usa_pjm_western_hub_da_power_price_forecast_hourly
+        description: "PJM Western-Hub DA power price forecast — deterministic point (hourly, Meteologica)."
+      - name: usa_pjm_western_hub_da_power_price_forecast_ecmwf_ens_hourly
+        description: "PJM Western-Hub DA power price forecast — ECMWF ENS (51 members + avg/bottom/top) (hourly, Meteologica)."
