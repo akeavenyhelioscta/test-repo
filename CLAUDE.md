@@ -125,10 +125,52 @@ outputs) and Azure Blob (larger artifacts), never the filesystem.
   consumed inside `lib/server/`.
 - **Styling.** Tailwind utility classes only — no CSS modules or
   styled-components. Reach for `clsx` / `cva` if class composition
-  gets unwieldy.
+  gets unwieldy. Theme is set in `frontend/app/globals.css` +
+  `frontend/app/layout.tsx`; see the Styling standards section
+  below before changing colors or fonts.
 - **Linting.** `npm run lint` (default `eslint-config-next`) must
   pass before commit. Don't loosen the ruleset without a written
   reason.
+
+### Styling standards
+
+The frontend ships a single dark theme. Light mode is not on the
+roadmap — operator-facing dashboards run all day next to terminal
+windows and chart tools, so the dark surface is the design intent,
+not a preference toggle.
+
+Tokens, defined once in `frontend/app/globals.css` and exposed to
+Tailwind in `frontend/tailwind.config.ts`:
+
+- `--background: #0f1117` — page background. Tailwind: `bg-background`.
+- `--foreground: #e5e7eb` — primary text. Tailwind: `text-foreground`.
+- Body font stack: system (`-apple-system, BlinkMacSystemFont,
+  "Segoe UI", Roboto, sans-serif`) — no custom web fonts.
+
+When extending the palette:
+
+- Prefer Tailwind's built-in slate / gray scale for surfaces
+  (`bg-gray-900/60`, `border-gray-800`, `text-slate-400`) — that's
+  what the reference app uses and what reads correctly against
+  `#0f1117`. Don't introduce a parallel "neutral-X" or "zinc-X"
+  scale; pick one ramp and stay on it.
+- Accent colors (current-period highlight, error, baseline-fit, etc.)
+  are codified in chart-token files, not redefined per component.
+  When charts arrive, add `frontend/lib/chartConstants.ts` mirroring
+  the spark-spread-viz file (slate gridlines, cyan current-period,
+  red error, amber baseline-fit) and import from there — no
+  per-chart hex literals.
+- Avoid `bg-white` / `text-black` anywhere in the app. If a surface
+  needs to pop against the page background, layer a darker
+  translucent panel (`bg-gray-900/60`, `border-gray-800`) rather
+  than inverting to a light surface.
+- Charts and tables: ticks `#94a3b8`, gridlines `#1f2937`, zero/axis
+  baseline `#475569`. Keep these in `lib/chartConstants.ts` once
+  it exists.
+
+Hydration: the body sets `suppressHydrationWarning` because browser
+extensions inject attributes that trip Next.js's mismatch warning on
+the dark background. Don't remove it.
 
 ### Vercel project setup
 
