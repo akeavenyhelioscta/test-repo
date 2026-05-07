@@ -84,6 +84,63 @@ solar/wind/net_load forecasts don't exist sub-zonally. Sub-zonal demand
 needs Meteologica (`load_meteologica_supply_demand_coalesced`), or the
 per-series load loader if only load is needed.
 
+## Frontend (`frontend/`)
+
+Next.js 15 App Router + React 19 + TypeScript + Tailwind 3, deployed
+to Vercel with `frontend/` as the project root. The Python repo and
+the frontend share git history but are independent build targets —
+nothing in `frontend/` imports Python or reads the modelling tree
+from disk. Data flows through Postgres (Azure-hosted marts and model
+outputs) and Azure Blob (larger artifacts), never the filesystem.
+
+### Layout pointers
+
+- `frontend/app/` — App Router routes, layouts, server components.
+- `frontend/app/api/` — route handlers (REST endpoints, cron targets).
+- `frontend/app/api/cron/*` — scheduled warmers, wired through
+  `frontend/vercel.json` once endpoints exist.
+- `frontend/components/` — shared React components. Co-locate
+  route-specific components under their route directory instead.
+- `frontend/lib/` — isomorphic, non-React utilities (formatters,
+  domain helpers, types).
+- `frontend/lib/server/` — server-only modules (DB clients, secrets
+  consumers). Each file in this directory must `import "server-only"`
+  at the top so accidental client imports fail loudly at build time.
+- `frontend/types/` — shared TypeScript types not tied to a route.
+
+### Conventions
+
+- **Server vs client.** Default to Server Components. Add
+  `"use client"` only when the component needs hooks, browser APIs,
+  or event handlers.
+- **Data fetching.** Server Components and route handlers query
+  Postgres directly via `pg` (or `@neondatabase/serverless`) — no
+  separate Python API layer. Client-side `useEffect` is for
+  interactivity, not initial data.
+- **Caching.** Lean on Next.js `fetch` cache + `revalidateTag` /
+  `revalidatePath`. Cron warmers under `app/api/cron/*` are the
+  canonical refresh path.
+- **Secrets.** Server-only env vars must not be `NEXT_PUBLIC_*`
+  prefixed. DB connection strings, API keys, blob SAS tokens — all
+  consumed inside `lib/server/`.
+- **Styling.** Tailwind utility classes only — no CSS modules or
+  styled-components. Reach for `clsx` / `cva` if class composition
+  gets unwieldy.
+- **Linting.** `npm run lint` (default `eslint-config-next`) must
+  pass before commit. Don't loosen the ruleset without a written
+  reason.
+
+### Vercel project setup
+
+- **Root Directory:** `frontend` (set in the Vercel dashboard so the
+  Python tree is excluded from builds).
+- **Cron jobs / function regions / max durations:** declared in
+  `frontend/vercel.json` once endpoints exist. No `vercel.json` is
+  required for the blank-page deploy.
+- **Environment variables:** managed in the Vercel dashboard, scoped
+  per environment. Mirror locally via `frontend/.env.local`
+  (gitignored).
+
 ## CLAUDE.md / MEMORY.md / settings.json — routing rule
 
 When recording a fact, route by **scope**:
