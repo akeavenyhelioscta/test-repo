@@ -40,8 +40,13 @@ The brief consumes four MCP endpoints from `http://localhost:8000`:
    notable outages
 3. `/views/transmission_outages_window_7d?format=json` — 7-day forward
    outlook (locked + planned)
-4. `/views/transmission_outages_changes_24h_simple?format=json` — last
-   24h NEW + REVISED tickets
+4. `/views/transmission_outages_changes_24h_snapshot?format=json` — last
+   24h NEW + REVISED + CLEARED tickets, driven by an SCD2 snapshot diff.
+   Each REVISED ticket carries `prev_*` fields and a `diff_text`
+   summarizing what changed (state transition, est_return shift,
+   risk-flag flip, cause edit). CLEARED is the unique value-add over
+   `_simple`: tickets that disappeared from the source feed without an
+   explicit return — silent clears that show up nowhere else.
 
 After hitting each endpoint, save the JSON response into per-view
 subfolders under `backend/mcp_server/briefings/`:
@@ -52,7 +57,7 @@ backend/mcp_server/briefings/
 │   └── 2026-05-01.json
 ├── transmission_outages_window_7d/
 │   └── 2026-05-01.json
-├── transmission_outages_changes_24h_simple/
+├── transmission_outages_changes_24h_snapshot/
 │   └── 2026-05-01.json
 └── transmission_outages_network/
     └── 2026-05-01.json
@@ -144,7 +149,38 @@ For each ≥500 kV row include rating; for 345 kV summarize by region
 + count if there's a coordinated maintenance window (multiple at same
 substation).
 
-### 5. Trading lens
+### 5. Last 24h delta
+
+Drive from the snapshot endpoint. Goal is to flag what *moved* since
+yesterday's brief — most days will be quiet, but the snapshot is the
+only feed that catches silent clears and material revisions. Three
+sub-buckets, each only rendered if non-empty:
+
+**5a. CLEARED ≥230 kV.** Any ticket in `cleared_tickets` (kV ≥ 230,
+LINE/XFMR/PS). These are the high-signal entries — the source feed
+dropped them without an explicit return. Surface every one by name
+with its last-known schedule and risk_flag. Even a single CLEARED
+500 kV ticket should lead the section.
+
+**5b. NEW high-impact.** Filter `new_tickets` to (kV ≥ 345 OR
+risk_flag=True). Drop one-day relay-maintenance blips beyond the
+7-day window unless they're risk-flagged. Show as a short table:
+facility, zone, kV/equip, start → return, risk, cause.
+
+**5c. REVISED — material only.** Filter `revised_tickets` for
+*material* `diff_text`:
+- state transition (Approved → Active, Active → Complete)
+- `est_return` pulled in or pushed out by >2 days
+- `risk_flag` flipped to True (newly elevated)
+- kV ≥ 345 facilities only — drop sub-345 churn
+Render as bullet list grouped by facility, quoting the `diff_text`
+verbatim. Suppress trivial revisions (cause-text edits, equipment-count
+changes, same-day est_return nudges).
+
+If all three buckets are empty, render a single line: "No material
+24h delta — feed is quiet." Don't pad.
+
+### 6. Trading lens
 
 3-5 bullets synthesizing the network + schedule view:
 - Identify the single biggest event of the next 7 days (compound effect
@@ -154,6 +190,9 @@ substation).
 - Flag any "noise" returns where parallel paths were already routing
   load (high redundancy = small DA impact)
 - Calendar arc: which day of the week is the constraint trough vs peak
+- Reflect §5 deltas where they matter: a CLEARED 500 kV ticket or a
+  newly-risk-flagged corridor changes today's read; cite the specific
+  facility
 
 ## Style notes
 
@@ -175,11 +214,12 @@ substation).
 
 ## Caveats to surface in-brief
 
-- The `_changes_24h_snapshot` endpoint is currently 503-disabled until
-  the SCD2 snapshot accumulates ≥24h of history (re-enable target
-  ~2026-05-08). Don't rely on its output until then.
 - The PSS/E model is from Sept 2021. Substations newer than that
   (e.g., MARS2 in DOM-N) won't match. Surface unmatched count.
+- The `_changes_24h_snapshot` endpoint went live 2026-05-06 (early vs
+  the original ~2026-05-08 target). If the snapshot ever returns 503
+  again — fall back to `_changes_24h_simple` and surface a brief
+  caveat that CLEARED/diff-text fields are unavailable.
 - **Consecutive ticket chains**: a single physical outage can be
   represented as a sequence of back-to-back tickets at the same
   facility (e.g., GRACETON-MANOR 4/27 → 5/10 followed by 5/8 → 6/6).
