@@ -1,0 +1,20 @@
+version: 2
+
+sources:
+
+  - name: pjm_model_outputs
+    schema: pjm_model_outputs
+    description: "Forecast runs published by the Python forecasters (modelling/da_models/<family>/publish.py via the shared publish_forecast_run). See root CLAUDE.md 'Cross-subtree contracts' and modelling/da_models/PUBLISHING.md."
+    tables:
+      - name: forecast_runs
+        description: "One row per (model_name, target_date, run_id). run_date is the forecast vintage (target_date - run_date = lead); da_lmp_total_onpeak_forecast is the OnPeak HE 8-23 point promoted off payload->'blocks'; payload jsonb carries the full per-hour/per-block detail. created_at / updated_at are row-write audit columns appended by azure_postgresql_utils. No freshness check — published on demand by the runner, not on a fixed schedule, and consumers tolerate missing rows."
+        columns:
+          - name: model_family       # text, e.g. 'like_day' | 'baseline'
+          - name: model_name         # text, e.g. 'pjm_rto_hourly' | 'baseline_meteo_da_price'
+          - name: run_date           # date — forecast vintage
+          - name: target_date        # date — delivery date
+          - name: da_lmp_total_onpeak_forecast  # numeric(10,2) — OnPeak HE 8-23 point
+          - name: payload            # jsonb
+          - name: run_id             # uuid
+          - name: created_at         # timestamptz (azure_postgresql_utils audit col)
+          - name: updated_at         # timestamptz (azure_postgresql_utils audit col)

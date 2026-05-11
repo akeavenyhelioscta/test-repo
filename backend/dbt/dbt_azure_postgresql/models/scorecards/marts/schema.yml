@@ -1,0 +1,140 @@
+version: 2
+
+models:
+
+  - name: scorecard_da_onpeak_wh_ice
+    description: "DA scorecard (ICE view): PJM Western Hub DA HE 8-23 averages (total / system-energy / congestion / loss) vs ICE settle. Spine = every delivery_date priced by ICE PDA D1-IUS (weekday) or PDO P1-IUS (weekend, unrolled into Sat + Sun). Forward-dated rows show up with NULL DA columns until PJM clears. ice_error = da_lmp_total - ice_vwap (positive = market under-priced). Pure market-color view — trade attribution and P&L live in the sibling scorecard_da_onpeak_wh_traders."
+    columns:
+      - name: delivery_date
+        description: "Delivery date the ICE strip prices. PK of the mart."
+        tests:
+          - unique
+          - not_null
+      - name: da_lmp_total
+        description: "Average PJM Western Hub DA total LMP over HE 8-23 of the delivery_date (literal hours, not NERC period). NULL when PJM has not cleared yet."
+      - name: da_lmp_system_energy
+        description: "Average PJM Western Hub DA system-energy component over HE 8-23 of the delivery_date."
+      - name: da_lmp_congestion
+        description: "Average PJM Western Hub DA congestion component over HE 8-23 of the delivery_date."
+      - name: da_lmp_loss
+        description: "Average PJM Western Hub DA marginal-loss component over HE 8-23 of the delivery_date."
+      - name: ice_start_date
+        description: "Start of the ICE strip that priced this delivery. For PDA D1 equals delivery_date; for PDO weekends both Sat + Sun unrolled rows share Saturday."
+        tests:
+          - not_null
+      - name: ice_end_date
+        description: "End of the ICE strip that priced this delivery. For PDA D1 equals delivery_date; for PDO weekends both Sat + Sun unrolled rows share Sunday."
+        tests:
+          - not_null
+      - name: product
+        description: "ICE symbol that priced this delivery: 'PDA D1-IUS' (weekday) or 'PDO P1-IUS' (weekend)."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['PDA D1-IUS', 'PDO P1-IUS']
+      - name: ice_description
+        description: "Human-readable label for the ICE product (e.g. 'PJM DA Next Day', 'PJM WH DA Off-Peak Weekend 2x16'). Pulled from the symbol registry in staging_v1_ticker_data."
+      - name: ice_trade_date_start
+        description: "First ICE session that priced this strip. = trade_date for PDA, Monday for PDO."
+      - name: ice_trade_date_last
+        description: "Last ICE session that priced this strip. = trade_date for PDA, Friday for PDO."
+      - name: ice_vwap
+        description: "Volume-weighted average price across the full trading life of the ICE strip. Primary comparison reference for ice_error."
+        tests:
+          - not_null
+      - name: ice_close
+        description: "Last tick price of the ICE strip's trading life. Carried for context — not used in ice_error."
+      - name: ice_error
+        description: "da_lmp_total - ice_vwap. Positive = market under-priced the realized clear. NULL when either side is NULL (forward-dated row, or NULL vwap on a thin strip)."
+
+  - name: model_forecasts_revisions
+    description: "Forecast revision trail: one row per (model_name, target_date, run_date) from pjm_model_outputs.forecast_runs — for each delivery date, the forecast as it stood at each vintage (run_date). forecast_run_revision = ROW_NUMBER over (model_name, target_date) ordered run_date DESC (1 = the latest run for this delivery; the highest = the earliest/furthest-out forecast — 7 for a complete daily 7-day history). da_lmp_total_onpeak_forecast is the OnPeak HE 8-23 headline; payload is the full jsonb so the frontend can rebuild the hourly / band tables per (delivery, vintage). Re-runs of the same (model_name, target_date, run_date) collapse to the latest by created_at."
+    columns:
+      - name: model_name
+        description: "Forecaster identity, e.g. 'baseline_meteo_da_price' or 'pjm_rto_hourly'."
+        tests:
+          - not_null
+      - name: model_family
+        description: "'like_day' or 'baseline' — the ForecastRunPayload union discriminator."
+      - name: target_date
+        description: "Delivery date being forecast."
+        tests:
+          - not_null
+      - name: run_date
+        description: "Vintage — the date the forecast was produced (target_date - run_date is the calendar lead)."
+        tests:
+          - not_null
+      - name: forecast_run_revision
+        description: "ROW_NUMBER() OVER (PARTITION BY model_name, target_date ORDER BY run_date DESC). 1 = the latest model run for this delivery (largest run_date — made closest to delivery); climbs through earlier vintages, so the highest value is the earliest / furthest-out forecast — for a complete daily 7-day history, 1..7 with 7 = predicted 7 days out. Dense rank, so a skipped run day shifts the numbers (use run_date / target_date - run_date for the actual calendar lead)."
+      - name: da_lmp_total_onpeak_forecast
+        description: "The OnPeak HE 8-23 point forecast for this vintage — the headline the publisher promotes off payload->'blocks'. $/MWh. NULL if the run recorded no headline number."
+      - name: run_id
+        description: "Run UUID. Batch pipelines (e.g. forecast_next_7_days.py) share one run_id across several target_dates; this is the one used for this (model, target_date) row."
+      - name: created_at
+        description: "Row-write timestamp (azure_postgresql_utils audit col). Used only as the tiebreaker collapsing same-vintage re-runs."
+      - name: payload
+        description: "Full run payload (jsonb) — KnnPayload or IcePayload keyed by model_family (see frontend/types/forecast.ts). Carries the per-hour forecast (hourly[]) and the per-block bands (blocks[]) so the frontend can rebuild the band tables for this (delivery, vintage)."
+
+  - name: scorecard_model_onpeak_wh
+    description: "Model scorecard: scorecard_da_onpeak_wh_ice (the ICE-priced delivery spine — DA HE 8-23 component breakdown + ICE strip OHLC/vwap/volume + ice_error) extended with each model's LATEST published forecast for that delivery, joined on the right (model_forecasts_revisions.forecast_run_revision = 1, target_date = delivery_date). Grain: one row per (delivery_date, model_name) — a delivery date with N models gives N rows (ICE/DA columns repeat); a delivery no model has touched gives one row with the model columns NULL; forward-dated rows carry the standing forecast with DA columns NULL until PJM clears. Compare model vs clear with da_lmp_total_onpeak_forecast - da_lmp_total, model vs curve with da_lmp_total_onpeak_forecast - ice_vwap (ice_error is on the row). See scorecard_da_onpeak_wh_ice for the ICE/DA column semantics."
+    columns:
+      - name: delivery_date
+        description: "Delivery date the ICE strip prices (= target_date on rows with a model forecast). From scorecard_da_onpeak_wh_ice — no longer unique here (fans out per model)."
+        tests:
+          - not_null
+      - name: da_lmp_total
+        description: "Average PJM Western Hub DA total LMP over HE 8-23 of delivery_date. NULL until PJM clears."
+      - name: da_lmp_system_energy
+        description: "Average PJM Western Hub DA system-energy component over HE 8-23 of delivery_date."
+      - name: da_lmp_congestion
+        description: "Average PJM Western Hub DA congestion component over HE 8-23 of delivery_date."
+      - name: da_lmp_loss
+        description: "Average PJM Western Hub DA marginal-loss component over HE 8-23 of delivery_date."
+      - name: ice_start_date
+        description: "Start of the ICE strip that priced this delivery."
+        tests:
+          - not_null
+      - name: ice_end_date
+        description: "End of the ICE strip that priced this delivery."
+        tests:
+          - not_null
+      - name: product
+        description: "ICE symbol that priced this delivery: 'PDA D1-IUS' (weekday) or 'PDO P1-IUS' (weekend)."
+        tests:
+          - not_null
+      - name: ice_description
+        description: "Human-readable label for the ICE product."
+      - name: ice_trade_date_start
+        description: "First ICE session that priced this strip."
+      - name: ice_trade_date_last
+        description: "Last ICE session that priced this strip."
+      - name: ice_open
+        description: "First tick price of the ICE strip's trading life."
+      - name: ice_high
+        description: "High tick price of the ICE strip's trading life."
+      - name: ice_low
+        description: "Low tick price of the ICE strip's trading life."
+      - name: ice_close
+        description: "Last tick price of the ICE strip's trading life."
+      - name: ice_vwap
+        description: "Volume-weighted average price across the ICE strip's trading life — the curve reference for ice_error and model-vs-curve."
+      - name: ice_volume
+        description: "Total traded volume on the ICE strip."
+      - name: ice_buy_volume
+        description: "Buy-side traded volume on the ICE strip."
+      - name: ice_sell_volume
+        description: "Sell-side traded volume on the ICE strip."
+      - name: ice_error
+        description: "da_lmp_total - ice_vwap. Positive = market under-priced the realized clear. NULL when either side is NULL."
+      - name: model_name
+        description: "Forecaster identity, e.g. 'baseline_meteo_da_price' or 'pjm_rto_hourly'. NULL on delivery dates with no model forecast."
+      - name: model_family
+        description: "'like_day' or 'baseline' — the ForecastRunPayload union discriminator. NULL when model_name is NULL."
+      - name: target_date
+        description: "Delivery date the model forecast targets (equals delivery_date on matched rows). NULL when model_name is NULL."
+      - name: run_date
+        description: "Vintage of the latest forecast for this (model_name, delivery) — the largest run_date in forecast_runs. NULL when model_name is NULL."
+      - name: da_lmp_total_onpeak_forecast
+        description: "The model's standing OnPeak HE 8-23 point call ($/MWh), latest vintage. Compare to da_lmp_total (vs realized clear) or ice_vwap (vs curve). NULL when model_name is NULL."
+      - name: payload
+        description: "Full run payload jsonb of the latest vintage — KnnPayload | IcePayload keyed by model_family (see frontend/types/forecast.ts); carries hourly[] and blocks[] for rebuilding the band tables. NULL when model_name is NULL."
