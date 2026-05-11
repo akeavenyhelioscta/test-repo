@@ -26,6 +26,7 @@ Endpoint → source mapping:
     /views/lmp_da_hub_summary                         → pjm_lmps_hourly (market='da')
     /views/lmp_da_outage_overlap                      → constraints × outages × PSS/E network
 """
+
 import logging
 from datetime import date, timedelta
 from enum import Enum
@@ -38,7 +39,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi_mcp import FastApiMCP
 
-from backend.mcp_server.data import constraints, lmp, transmission_outages
+from backend.mcp_server.data import (
+    constraints,
+    hub_buses,
+    hub_impact,
+    lmp,
+    transmission_outages,
+)
 from backend.mcp_server.data.constraint_network_match import (
     match_constraints_to_branches,
 )
@@ -50,6 +57,11 @@ from backend.mcp_server.views.constraints import (
     build_da_network_view_model,
     build_rt_dart_network_view_model,
 )
+from backend.mcp_server.views.hub_buses import (
+    build_hub_buses_detail_view_model,
+    build_hub_buses_summary_view_model,
+)
+from backend.mcp_server.views.hub_impact import build_hub_impact_view_model
 from backend.mcp_server.views.lmp import (
     build_lmp_da_hub_summary_view_model,
     build_lmp_da_outage_overlap_view_model,
@@ -60,6 +72,9 @@ from backend.mcp_server.views.lmp import (
 from backend.mcp_server.views.markdown_formatters import (
     format_constraints_da_network,
     format_constraints_rt_dart_network,
+    format_hub_buses_detail,
+    format_hub_buses_summary,
+    format_hub_impact,
     format_lmp_da_hub_summary,
     format_lmp_da_outage_overlap,
     format_lmps_daily_summary,
@@ -220,7 +235,9 @@ def _get_network() -> tuple[pd.DataFrame, pd.DataFrame]:
 @app.get("/views/transmission_outages_network")
 def get_transmission_outages_network(
     format: OutputFormat = Query(OutputFormat.md, description="md (markdown) or json"),
-    max_neighbors: int = Query(5, ge=0, le=20, description="1-hop neighbors per outage"),
+    max_neighbors: int = Query(
+        5, ge=0, le=20, description="1-hop neighbors per outage"
+    ),
 ):
     """Active outages cross-referenced with the PJM PSS/E network model.
 
@@ -251,16 +268,24 @@ def get_transmission_outages_network(
 @app.get("/views/constraints_da_network")
 def get_constraints_da_network(
     target_date: date | None = Query(
-        None, description="DA target date (default: tomorrow)",
+        None,
+        description="DA target date (default: tomorrow)",
     ),
     top_n: int = Query(
-        20, ge=1, le=200, description="Top-N constraints by total_price",
+        20,
+        ge=1,
+        le=200,
+        description="Top-N constraints by total_price",
     ),
     max_neighbors: int = Query(
-        10, ge=0, le=30, description="2-hop ≥230kV neighbors per matched constraint",
+        10,
+        ge=0,
+        le=30,
+        description="2-hop ≥230kV neighbors per matched constraint",
     ),
     binding_hours: list[int] | None = Query(
-        None, description="HE values 1-24 from Tier 2; when set, filters and re-ranks",
+        None,
+        description="HE values 1-24 from Tier 2; when set, filters and re-ranks",
     ),
     format: OutputFormat = Query(OutputFormat.md, description="md or json"),
 ):
@@ -287,8 +312,11 @@ def get_constraints_da_network(
     df = constraints.pull_constraints_da(target_date)
     enriched = match_constraints_to_branches(df, branches_df, buses_df)
     vm = build_da_network_view_model(
-        enriched, branches_df, target_date,
-        top_n=top_n, max_neighbors=max_neighbors,
+        enriched,
+        branches_df,
+        target_date,
+        top_n=top_n,
+        max_neighbors=max_neighbors,
         binding_hours=binding_hours,
     )
     if format == OutputFormat.json:
@@ -305,21 +333,29 @@ def get_constraints_da_network(
 @app.get("/views/constraints_rt_dart_network")
 def get_constraints_rt_dart_network(
     start_date: date | None = Query(
-        None, description="Window start (default: T-7)",
+        None,
+        description="Window start (default: T-7)",
     ),
     end_date: date | None = Query(
-        None, description="Window end (default: T-1)",
+        None,
+        description="Window end (default: T-1)",
     ),
     top_n: int = Query(
-        30, ge=1, le=300, description="Top-N (date, constraint) pairs by |DART|",
+        30,
+        ge=1,
+        le=300,
+        description="Top-N (date, constraint) pairs by |DART|",
     ),
     max_neighbors: int = Query(
-        10, ge=0, le=30, description="2-hop ≥230kV neighbors per matched constraint",
+        10,
+        ge=0,
+        le=30,
+        description="2-hop ≥230kV neighbors per matched constraint",
     ),
     morning_mode: bool = Query(
         False,
         description="Roll up across days into worst_binders with binding-HE "
-                    "pattern + daily breakdown (used by /pjm-pre-da-morning-brief)",
+        "pattern + daily breakdown (used by /pjm-pre-da-morning-brief)",
     ),
     format: OutputFormat = Query(OutputFormat.md, description="md or json"),
 ):
@@ -345,8 +381,12 @@ def get_constraints_rt_dart_network(
     df = constraints.pull_constraints_rt_dart(start_date, end_date)
     enriched = match_constraints_to_branches(df, branches_df, buses_df)
     vm = build_rt_dart_network_view_model(
-        enriched, branches_df, start_date, end_date,
-        top_n=top_n, max_neighbors=max_neighbors,
+        enriched,
+        branches_df,
+        start_date,
+        end_date,
+        top_n=top_n,
+        max_neighbors=max_neighbors,
         morning_mode=morning_mode,
     )
     if format == OutputFormat.json:
@@ -363,7 +403,8 @@ def get_constraints_rt_dart_network(
 @app.get("/views/lmp_da_hub_summary")
 def get_lmp_da_hub_summary(
     target_date: date | None = Query(
-        None, description="DA target date (default: tomorrow)",
+        None,
+        description="DA target date (default: tomorrow)",
     ),
     format: OutputFormat = Query(OutputFormat.md, description="md or json"),
 ):
@@ -397,13 +438,20 @@ def get_lmp_da_hub_summary(
 @app.get("/views/lmp_da_outage_overlap")
 def get_lmp_da_outage_overlap(
     target_date: date | None = Query(
-        None, description="DA target date (default: tomorrow)",
+        None,
+        description="DA target date (default: tomorrow)",
     ),
     top_n: int = Query(
-        20, ge=1, le=100, description="Top-N DA constraints by total_price",
+        20,
+        ge=1,
+        le=100,
+        description="Top-N DA constraints by total_price",
     ),
     max_neighbors: int = Query(
-        10, ge=0, le=30, description="2-hop ≥230kV neighbors per constraint",
+        10,
+        ge=0,
+        le=30,
+        description="2-hop ≥230kV neighbors per constraint",
     ),
     format: OutputFormat = Query(OutputFormat.md, description="md or json"),
 ):
@@ -425,15 +473,21 @@ def get_lmp_da_outage_overlap(
 
     constraints_df = constraints.pull_constraints_da(target_date)
     enriched_constraints = match_constraints_to_branches(
-        constraints_df, branches_df, buses_df,
+        constraints_df,
+        branches_df,
+        buses_df,
     )
 
     outages_df = transmission_outages.pull_window_7d()
     enriched_outages = match_outages_to_branches(outages_df, branches_df, buses_df)
 
     vm = build_lmp_da_outage_overlap_view_model(
-        enriched_constraints, enriched_outages, branches_df, target_date,
-        top_n=top_n, max_neighbors=max_neighbors,
+        enriched_constraints,
+        enriched_outages,
+        branches_df,
+        target_date,
+        top_n=top_n,
+        max_neighbors=max_neighbors,
     )
     if format == OutputFormat.json:
         return vm
@@ -449,10 +503,14 @@ def get_lmp_da_outage_overlap(
 @app.get("/views/lmps_daily_summary")
 def get_lmps_daily_summary(
     target_date: date | None = Query(
-        None, description="DA target date (default: tomorrow)",
+        None,
+        description="DA target date (default: tomorrow)",
     ),
     top_n_drilldown: int = Query(
-        5, ge=1, le=20, description="Hubs handed to Tier 2 hourly drilldown",
+        5,
+        ge=1,
+        le=20,
+        description="Hubs handed to Tier 2 hourly drilldown",
     ),
     compare_peer: bool = Query(
         False,
@@ -482,7 +540,8 @@ def get_lmps_daily_summary(
         prior_df = lmp.pull_lmp_da_hourly(prior_date)
 
     vm = build_lmps_daily_summary_view_model(
-        df, target_date,
+        df,
+        target_date,
         top_n_drilldown=top_n_drilldown,
         prior_period_df=prior_df,
         prior_period_date=prior_date,
@@ -501,16 +560,25 @@ def get_lmps_daily_summary(
 @app.get("/views/lmps_dart_realization")
 def get_lmps_dart_realization(
     target_date: date | None = Query(
-        None, description="End of window (default: yesterday / T-1)",
+        None,
+        description="End of window (default: yesterday / T-1)",
     ),
     lookback_days: int = Query(
-        7, ge=2, le=30, description="Days of history (window = T-lookback..T)",
+        7,
+        ge=2,
+        le=30,
+        description="Days of history (window = T-lookback..T)",
     ),
     top_n_drilldown: int = Query(
-        5, ge=1, le=20, description="Hubs handed to Tier 2 hourly drilldown",
+        5,
+        ge=1,
+        le=20,
+        description="Hubs handed to Tier 2 hourly drilldown",
     ),
     dart_threshold: float = Query(
-        10.0, ge=0, le=200,
+        10.0,
+        ge=0,
+        le=200,
         description="$/MWh — count hub-days where |DART cong| crosses this",
     ),
     format: OutputFormat = Query(OutputFormat.md, description="md or json"),
@@ -527,7 +595,8 @@ def get_lmps_dart_realization(
 
     df = lmp.pull_lmps_window(start_date, target_date)
     vm = build_lmps_dart_realization_view_model(
-        df, target_date,
+        df,
+        target_date,
         lookback_days=lookback_days,
         top_n_drilldown=top_n_drilldown,
         dart_threshold=dart_threshold,
@@ -546,13 +615,17 @@ def get_lmps_dart_realization(
 @app.get("/views/lmps_hourly_summary")
 def get_lmps_hourly_summary(
     target_date: date | None = Query(
-        None, description="DA target date (default: tomorrow)",
+        None,
+        description="DA target date (default: tomorrow)",
     ),
     hubs: str | None = Query(
-        None, description="Comma-separated hub names (default: top 5 from Tier 1)",
+        None,
+        description="Comma-separated hub names (default: top 5 from Tier 1)",
     ),
     binding_threshold: float = Query(
-        25.0, ge=0, le=500,
+        25.0,
+        ge=0,
+        le=500,
         description="$/MWh — hours where any hub crosses this become 'binding'",
     ),
     format: OutputFormat = Query(OutputFormat.md, description="md or json"),
@@ -570,8 +643,10 @@ def get_lmps_hourly_summary(
     hubs_list = [h.strip() for h in hubs.split(",")] if hubs else None
     df = lmp.pull_lmp_da_hourly(target_date, hubs=hubs_list)
     vm = build_lmps_hourly_summary_view_model(
-        df, target_date,
-        hubs_filter=hubs_list, binding_threshold=binding_threshold,
+        df,
+        target_date,
+        hubs_filter=hubs_list,
+        binding_threshold=binding_threshold,
     )
     if format == OutputFormat.json:
         return vm
@@ -621,14 +696,18 @@ def _parse_constraint_labels(s: str | None) -> dict[int, list[str]]:
 @app.get("/views/transmission_outages_for_constraints")
 def get_transmission_outages_for_constraints(
     bus_ids: str = Query(
-        ..., description="CSV of PSS/E bus integers (Tier 3 neighbor_bus_ids union)",
+        ...,
+        description="CSV of PSS/E bus integers (Tier 3 neighbor_bus_ids union)",
     ),
     constraint_labels: str | None = Query(
         None,
         description="CSV 'bus:label,bus:label' for cross-link annotation",
     ),
     max_neighbors: int = Query(
-        3, ge=0, le=10, description="1-hop neighbors per outage",
+        3,
+        ge=0,
+        le=10,
+        description="1-hop neighbors per outage",
     ),
     format: OutputFormat = Query(OutputFormat.md, description="md or json"),
 ):
@@ -661,7 +740,9 @@ def get_transmission_outages_for_constraints(
     active_df = transmission_outages.pull_active()
     enriched = match_outages_to_branches(active_df, branches_df, buses_df)
     vm = build_outages_for_constraints_view_model(
-        enriched, branches_df, bus_id_list,
+        enriched,
+        branches_df,
+        bus_id_list,
         constraint_index=label_map,
         max_neighbors=max_neighbors,
     )
@@ -679,22 +760,30 @@ def get_transmission_outages_for_constraints(
 @app.get("/views/historical_outages_for_constraints")
 def get_historical_outages_for_constraints(
     bus_ids: str = Query(
-        ..., description="CSV of PSS/E bus integers (Tier 2 worst_binders bus_ids union)",
+        ...,
+        description="CSV of PSS/E bus integers (Tier 2 worst_binders bus_ids union)",
     ),
     start_date: date | None = Query(
-        None, description="Window start (default: end_date - 6 days)",
+        None,
+        description="Window start (default: end_date - 6 days)",
     ),
     end_date: date | None = Query(
-        None, description="Window end (default: today - 1)",
+        None,
+        description="Window end (default: today - 1)",
     ),
     binding_hours: list[int] | None = Query(
-        None, description="HEs of interest (informational; for overlap counting)",
+        None,
+        description="HEs of interest (informational; for overlap counting)",
     ),
     constraint_labels: str | None = Query(
-        None, description="CSV 'bus:label,bus:label' for cross-link annotation",
+        None,
+        description="CSV 'bus:label,bus:label' for cross-link annotation",
     ),
     max_neighbors: int = Query(
-        3, ge=0, le=10, description="1-hop neighbors per outage",
+        3,
+        ge=0,
+        le=10,
+        description="1-hop neighbors per outage",
     ),
     format: OutputFormat = Query(OutputFormat.md, description="md or json"),
 ):
@@ -720,12 +809,14 @@ def get_historical_outages_for_constraints(
     except ValueError:
         return PlainTextResponse(
             content='{"error": "bus_ids must be CSV of integers"}',
-            status_code=400, media_type="application/json",
+            status_code=400,
+            media_type="application/json",
         )
     if not bus_id_list:
         return PlainTextResponse(
             content='{"error": "bus_ids is required"}',
-            status_code=400, media_type="application/json",
+            status_code=400,
+            media_type="application/json",
         )
 
     label_map = _parse_constraint_labels(constraint_labels)
@@ -734,7 +825,9 @@ def get_historical_outages_for_constraints(
     df = transmission_outages.pull_outages_in_window(start_date, end_date)
     enriched = match_outages_to_branches(df, branches_df, buses_df)
     vm = build_historical_outages_for_constraints_view_model(
-        enriched, branches_df, bus_id_list,
+        enriched,
+        branches_df,
+        bus_id_list,
         binding_hours=binding_hours,
         constraint_index=label_map,
         window_start=start_date,
@@ -746,6 +839,152 @@ def get_historical_outages_for_constraints(
         return vm
     return PlainTextResponse(
         content=format_historical_outages_for_constraints(vm),
+        media_type="text/markdown",
+    )
+
+
+# ─── Hub buses (agg_definitions bridge) ──────────────────────────────────────
+
+
+@app.get("/views/hub_buses")
+def get_hub_buses(
+    hub_name: str | None = Query(
+        None,
+        description=(
+            "Aggregate-pnode name to look up (case-insensitive exact match) — e.g. "
+            "'WESTERN HUB', 'AEP-DAYTON HUB', 'DOM_ZONE'. When provided, returns the "
+            "ranked bus list for that aggregate. When omitted, returns a discovery "
+            "summary across all aggregates of the requested type."
+        ),
+    ),
+    agg_pnode_type: str | None = Query(
+        "HUB",
+        description=(
+            "Aggregate type filter (case-insensitive). One of HUB, ZONE, "
+            "RESID_AGG_FTR, EHV, INTERFACE, OTHER. Default 'HUB' surfaces the "
+            "trader-relevant aggregates and hides the ~1,200 individual "
+            "generator/load pnodes in the OTHER bucket. Pass an empty string to "
+            "include all types in the discovery summary. Ignored when hub_name is "
+            "provided."
+        ),
+    ),
+    format: OutputFormat = Query(OutputFormat.md, description="md or json"),
+):
+    """PJM aggregate-pnode → bus-pnode lookup (the hub→bus bridge).
+
+    Source: ``pjm_da_modelling_cleaned.pjm_agg_definitions_active`` (built
+    by the dbt mart from the weekly ``agg_definitions`` scrape).
+
+    Two modes:
+
+    - **Detail** (``hub_name`` provided): one row per bus_pnode in the
+      named aggregate, sorted by ``bus_pnode_factor`` desc. Header
+      carries aggregate type, ID, bus_count, and factor_sum (sanity:
+      should be ~1.0 for properly-defined aggregates).
+    - **Summary** (``hub_name`` omitted): one row per aggregate matching
+      ``agg_pnode_type``, with bus_count and factor_sum. Use to discover
+      what hubs / zones / FTR aggregates exist before drilling in.
+
+    PJM does not publish a pnode → PSS/E bus mapping, so the
+    ``bus_pnode_id`` values returned here live in PJM's settlement-layer
+    ID space — they're suitable for joining to LMP feeds (which key on
+    pnode_id) but not directly comparable to PSS/E bus IDs without a
+    name-based bridge.
+    """
+    if hub_name:
+        df = hub_buses.pull_hub_buses(hub_name)
+        vm = build_hub_buses_detail_view_model(df, hub_name)
+        if format == OutputFormat.json:
+            return vm
+        return PlainTextResponse(
+            content=format_hub_buses_detail(vm),
+            media_type="text/markdown",
+        )
+
+    type_filter = agg_pnode_type if agg_pnode_type else None
+    df = hub_buses.pull_aggregates_summary(type_filter)
+    vm = build_hub_buses_summary_view_model(df, type_filter)
+    if format == OutputFormat.json:
+        return vm
+    return PlainTextResponse(
+        content=format_hub_buses_summary(vm),
+        media_type="text/markdown",
+    )
+
+
+# ─── Hub impact (DC shift-factor lookup) ─────────────────────────────────────
+
+
+@app.get("/views/hub_impact")
+def get_hub_impact(
+    hub_name: str = Query(
+        ...,
+        description=(
+            "PJM aggregate-pnode name (case-sensitive). Currently cached: "
+            "WESTERN HUB, EASTERN HUB, AEP-DAYTON HUB, OHIO HUB, DOMINION HUB, "
+            "NEW JERSEY HUB, CHICAGO HUB, N ILLINOIS HUB, CHICAGO GEN HUB, "
+            "ATSI GEN HUB, AEP GEN HUB, WEST INT HUB. Call /views/hub_buses "
+            "to list available hubs and their compositions."
+        ),
+    ),
+    from_bus: int = Query(
+        ...,
+        description="PSS/E bus_id of the constraint's from-end (matches `from_bus_psse` in constraints_da_network output).",
+    ),
+    to_bus: int = Query(
+        ...,
+        description="PSS/E bus_id of the constraint's to-end (matches `to_bus_psse` in constraints_da_network output).",
+    ),
+    shadow_price: float | None = Query(
+        None,
+        description="Constraint shadow price in $/MWh (the constraint's binding $/MWh, e.g. `da_total_price` or `binding_price` from constraints views). When provided, the response includes `hub_lmp_impact_dollars_per_mwh` = shadow_price * hub_isf — the estimated hub LMP impact from this constraint. Optional; omit to get only the bare ISF.",
+    ),
+    format: OutputFormat = Query(OutputFormat.md, description="md or json"),
+):
+    """Estimate hub LMP impact from a binding constraint.
+
+    Reads the locally-computed DC shift-factor cache
+    (`backend/mcp_server/data/network/hub_branch_weights.parquet`) for
+    the branch (from_bus, to_bus) under the named hub and returns:
+
+    - `hub_isf`: hub-weighted shift factor for the branch ([-1, +1]).
+      This is the partial derivative of branch flow with respect to
+      a 1 MW transfer from the hub to system-load-distributed slack.
+    - `hub_lmp_impact_dollars_per_mwh` (if shadow_price provided):
+      `shadow_price * hub_isf` — the estimated $ impact on hub LMP
+      from this constraint binding at the given shadow price.
+    - `magnitude_class`: HIGH (|hub_isf| ≥ 0.05), MED (≥ 0.01), or LOW.
+
+    PJM does NOT publish shift factors via Data Miner 2; these are
+    computed locally from the PSS/E .raw model (Sept 2021 vintage).
+    Post-2021 facilities (e.g. MARS2, DUMONT2) won't match — response
+    has `matched: false`.
+
+    Sign convention: positive `hub_isf` means injection at the hub
+    increases flow in the from→to direction. For a constraint that
+    limits flow in that direction, hub LMP rises by `shadow * hub_isf`.
+    Negative `hub_isf` means hub injection RELIEVES the constraint —
+    binding pushes hub LMP DOWN. Always check the sign before
+    classifying as stress vs. relief.
+
+    Use case: brief subagents call this once per top-N binding
+    constraint to re-rank by hub-relevance instead of raw shadow price.
+    Cache is in-memory after first call; ~5ms per lookup.
+    """
+    isf_record = hub_impact.lookup_hub_isf(
+        hub_name=hub_name, from_bus=from_bus, to_bus=to_bus
+    )
+    vm = build_hub_impact_view_model(
+        hub_name=hub_name,
+        from_bus=from_bus,
+        to_bus=to_bus,
+        shadow_price=shadow_price,
+        isf_record=isf_record,
+    )
+    if format == OutputFormat.json:
+        return vm
+    return PlainTextResponse(
+        content=format_hub_impact(vm),
         media_type="text/markdown",
     )
 

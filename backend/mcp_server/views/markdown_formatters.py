@@ -3,6 +3,7 @@
 One formatter per view model. Each takes the dict produced by the matching
 builder in `views/transmission_outages.py` and returns a markdown string.
 """
+
 from __future__ import annotations
 
 from tabulate import tabulate
@@ -41,49 +42,74 @@ def format_transmission_outages_active(vm: dict) -> str:
     if regional:
         parts.append("\n## Regional Summary")
         headers = [
-            "Region", "Total", "Lines", "Equip",
-            "765kV", "500kV", "345kV", "230kV",
-            "Risk", "Longest Out", "Soonest Return",
+            "Region",
+            "Total",
+            "Lines",
+            "Equip",
+            "765kV",
+            "500kV",
+            "345kV",
+            "230kV",
+            "Risk",
+            "Longest Out",
+            "Soonest Return",
         ]
         rows = []
         for r in regional:
-            rows.append([
-                r["region"],
-                r["total"],
-                r.get("path_count") or "-",
-                r.get("capacity_count") or "-",
-                r["count_765kv"] or "-",
-                r["count_500kv"] or "-",
-                r["count_345kv"] or "-",
-                r["count_230kv"] or "-",
-                r["risk_flagged"] or "-",
-                f"{r['longest_out_days']}d" if r.get("longest_out_days") else "-",
-                f"{r['soonest_return_days']}d" if r.get("soonest_return_days") is not None else "-",
-            ])
+            rows.append(
+                [
+                    r["region"],
+                    r["total"],
+                    r.get("path_count") or "-",
+                    r.get("capacity_count") or "-",
+                    r["count_765kv"] or "-",
+                    r["count_500kv"] or "-",
+                    r["count_345kv"] or "-",
+                    r["count_230kv"] or "-",
+                    r["risk_flagged"] or "-",
+                    f"{r['longest_out_days']}d" if r.get("longest_out_days") else "-",
+                    f"{r['soonest_return_days']}d"
+                    if r.get("soonest_return_days") is not None
+                    else "-",
+                ]
+            )
         parts.append(_table(headers, rows))
 
     notable = vm.get("notable_outages", [])
     if notable:
         parts.append(f"\n## Notable Outages ({len(notable)})")
         headers = [
-            "Tags", "Region", "Facility", "Type", "kV", "Route",
-            "Started", "Est Return", "Days Out", "Days Left", "Cause",
+            "Tags",
+            "Region",
+            "Facility",
+            "Type",
+            "kV",
+            "Route",
+            "Started",
+            "Est Return",
+            "Days Out",
+            "Days Left",
+            "Cause",
         ]
         rows = []
         for n in notable:
-            rows.append([
-                ", ".join(n["tags"]),
-                n["region"],
-                n.get("facility", "")[:40],
-                n.get("equip_category", n.get("equip", "")),
-                n["kv"],
-                _route(n),
-                n.get("started", "-"),
-                n.get("est_return", "-"),
-                n.get("days_out", "-"),
-                n.get("days_to_return") if n.get("days_to_return") is not None else "overdue",
-                n.get("cause", "")[:35],
-            ])
+            rows.append(
+                [
+                    ", ".join(n["tags"]),
+                    n["region"],
+                    n.get("facility", "")[:40],
+                    n.get("equip_category", n.get("equip", "")),
+                    n["kv"],
+                    _route(n),
+                    n.get("started", "-"),
+                    n.get("est_return", "-"),
+                    n.get("days_out", "-"),
+                    n.get("days_to_return")
+                    if n.get("days_to_return") is not None
+                    else "overdue",
+                    n.get("cause", "")[:35],
+                ]
+            )
         parts.append(_table(headers, rows))
 
     return "\n".join(parts)
@@ -95,7 +121,9 @@ def format_transmission_outages_active(vm: dict) -> str:
 def format_transmission_outages_window_7d(vm: dict) -> str:
     """Markdown for ``GET /views/transmission_outages_window_7d``."""
     parts: list[str] = []
-    parts.append(f"# Transmission Outages — Next 7 Days — {vm.get('reference_date', '?')}")
+    parts.append(
+        f"# Transmission Outages — Next 7 Days — {vm.get('reference_date', '?')}"
+    )
     parts.append(
         f"\n**{vm.get('total', 0)}** outages overlap the window — "
         f"**{vm.get('locked_count', 0)} locked** (Active/Approved), "
@@ -108,24 +136,30 @@ def format_transmission_outages_window_7d(vm: dict) -> str:
         headers = ["Region", "Total", "Locked", "Planned", "500kV+", "Risk"]
         rows = []
         for r in regional:
-            rows.append([
-                r["region"],
-                r["total"],
-                r["locked"] or "-",
-                r["planned"] or "-",
-                r["count_500kv_plus"] or "-",
-                r["risk_flagged"] or "-",
-            ])
+            rows.append(
+                [
+                    r["region"],
+                    r["total"],
+                    r["locked"] or "-",
+                    r["planned"] or "-",
+                    r["count_500kv_plus"] or "-",
+                    r["risk_flagged"] or "-",
+                ]
+            )
         parts.append(_table(headers, rows))
 
     locked = vm.get("locked_outages", [])
     if locked:
-        parts.append(f"\n## Locked Outages ({len(locked)}) — Active or Approved, sorted by days-to-return")
+        parts.append(
+            f"\n## Locked Outages ({len(locked)}) — Active or Approved, sorted by days-to-return"
+        )
         parts.append(_window_outage_table(locked))
 
     planned = vm.get("planned_outages", [])
     if planned:
-        parts.append(f"\n## Planned Outages ({len(planned)}) — Received (unapproved), sorted by start date")
+        parts.append(
+            f"\n## Planned Outages ({len(planned)}) — Received (unapproved), sorted by start date"
+        )
         parts.append(_window_outage_table(planned))
 
     return "\n".join(parts)
@@ -133,24 +167,37 @@ def format_transmission_outages_window_7d(vm: dict) -> str:
 
 def _window_outage_table(outages: list[dict]) -> str:
     headers = [
-        "Region", "Facility", "Type", "kV", "Route",
-        "State", "Risk", "Start", "End", "Days Left", "Cause",
+        "Region",
+        "Facility",
+        "Type",
+        "kV",
+        "Route",
+        "State",
+        "Risk",
+        "Start",
+        "End",
+        "Days Left",
+        "Cause",
     ]
     rows = []
     for n in outages:
-        rows.append([
-            n["region"],
-            n.get("facility", "")[:40],
-            n.get("equip_category", n.get("equip", "")),
-            n["kv"],
-            _route(n),
-            n.get("outage_state", "-"),
-            "Yes" if n.get("risk_flag") else "-",
-            n.get("started", "-"),
-            n.get("est_return", "-"),
-            n.get("days_to_return") if n.get("days_to_return") is not None else "overdue",
-            n.get("cause", "")[:35],
-        ])
+        rows.append(
+            [
+                n["region"],
+                n.get("facility", "")[:40],
+                n.get("equip_category", n.get("equip", "")),
+                n["kv"],
+                _route(n),
+                n.get("outage_state", "-"),
+                "Yes" if n.get("risk_flag") else "-",
+                n.get("started", "-"),
+                n.get("est_return", "-"),
+                n.get("days_to_return")
+                if n.get("days_to_return") is not None
+                else "overdue",
+                n.get("cause", "")[:35],
+            ]
+        )
     return _table(headers, rows)
 
 
@@ -160,7 +207,9 @@ def _window_outage_table(outages: list[dict]) -> str:
 def format_transmission_outages_changes_24h_simple(vm: dict) -> str:
     """Markdown for ``GET /views/transmission_outages_changes_24h_simple``."""
     parts: list[str] = []
-    parts.append(f"# Transmission Outages — Last 24h Delta (simple) — {vm.get('reference_date', '?')}")
+    parts.append(
+        f"# Transmission Outages — Last 24h Delta (simple) — {vm.get('reference_date', '?')}"
+    )
     parts.append(
         f"\n**{vm.get('total_changes', 0)}** changes — "
         f"**{vm.get('new_count', 0)} new**, **{vm.get('revised_count', 0)} revised**. "
@@ -189,7 +238,9 @@ def format_transmission_outages_changes_24h_simple(vm: dict) -> str:
 def format_transmission_outages_changes_24h_snapshot(vm: dict) -> str:
     """Markdown for ``GET /views/transmission_outages_changes_24h_snapshot``."""
     parts: list[str] = []
-    parts.append(f"# Transmission Outages — Last 24h Delta (snapshot) — {vm.get('reference_date', '?')}")
+    parts.append(
+        f"# Transmission Outages — Last 24h Delta (snapshot) — {vm.get('reference_date', '?')}"
+    )
 
     note = vm.get("note")
     if note:
@@ -215,7 +266,9 @@ def format_transmission_outages_changes_24h_snapshot(vm: dict) -> str:
 
     cleared = vm.get("cleared_tickets", [])
     if cleared:
-        parts.append(f"\n## Cleared Tickets ({len(cleared)}) — vanished from PJM source in last 24h")
+        parts.append(
+            f"\n## Cleared Tickets ({len(cleared)}) — vanished from PJM source in last 24h"
+        )
         parts.append(_change_outage_table(cleared, include_diff=False))
 
     if not new_t and not rev and not cleared and not note:
@@ -231,8 +284,16 @@ def _change_outage_table(outages: list[dict], *, include_diff: bool) -> str:
     diff_text from the snapshot variant (e.g. "end: 5/12 → 5/19, state: ...").
     """
     headers = [
-        "Region", "Facility", "Type", "kV", "Route",
-        "State", "Start", "End", "Risk", "Cause",
+        "Region",
+        "Facility",
+        "Type",
+        "kV",
+        "Route",
+        "State",
+        "Start",
+        "End",
+        "Risk",
+        "Cause",
     ]
     if include_diff:
         headers.append("Diff")
@@ -266,7 +327,9 @@ def format_transmission_outages_network(vm: dict) -> str:
         return f"# Error\n\n{vm['error']}"
 
     parts: list[str] = []
-    parts.append(f"# Transmission Outages — Network Enrichment — {vm.get('reference_date', '?')}")
+    parts.append(
+        f"# Transmission Outages — Network Enrichment — {vm.get('reference_date', '?')}"
+    )
 
     cov = vm.get("match_coverage", {})
     parts.append(
@@ -303,8 +366,15 @@ def format_transmission_outages_network(vm: dict) -> str:
 
 def _network_outage_table(outages: list[dict], *, with_neighbors: bool) -> str:
     headers = [
-        "Region", "Facility", "Type", "kV", "Route",
-        "From Bus", "To Bus", "Rating MVA", "Neighbors",
+        "Region",
+        "Facility",
+        "Type",
+        "kV",
+        "Route",
+        "From Bus",
+        "To Bus",
+        "Rating MVA",
+        "Neighbors",
     ]
     if with_neighbors:
         headers.append("Top Neighbors")
@@ -331,8 +401,13 @@ def _network_outage_table(outages: list[dict], *, with_neighbors: bool) -> str:
 def _network_unmatched_table(outages: list[dict]) -> str:
     headers = ["Region", "Zone", "Facility", "Type", "kV"]
     rows = [
-        [n["region"], n.get("zone", "-"), n.get("facility", "")[:50],
-         n.get("equip_category", n.get("equip", "")), n["kv"]]
+        [
+            n["region"],
+            n.get("zone", "-"),
+            n.get("facility", "")[:50],
+            n.get("equip_category", n.get("equip", "")),
+            n["kv"],
+        ]
         for n in outages
     ]
     return _table(headers, rows)
@@ -406,20 +481,20 @@ def format_constraints_da_network(vm: dict) -> str:
     if matched:
         sort_label = "binding HE price" if bh else "total price"
         parts.append(f"\n## Matched ({len(matched)}) — sorted by {sort_label}")
-        parts.append(_constraint_da_table(matched, with_neighbors=True, binding_hours=bh))
+        parts.append(
+            _constraint_da_table(matched, with_neighbors=True, binding_hours=bh)
+        )
 
     ambiguous = vm.get("ambiguous_constraints", [])
     if ambiguous:
+        parts.append(f"\n## Ambiguous ({len(ambiguous)}) — first PSS/E candidate shown")
         parts.append(
-            f"\n## Ambiguous ({len(ambiguous)}) — first PSS/E candidate shown"
+            _constraint_da_table(ambiguous, with_neighbors=True, binding_hours=bh)
         )
-        parts.append(_constraint_da_table(ambiguous, with_neighbors=True, binding_hours=bh))
 
     unmatched = vm.get("unmatched_constraints", [])
     if unmatched:
-        parts.append(
-            f"\n## Unmatched ({len(unmatched)}) — facility not found in PSS/E"
-        )
+        parts.append(f"\n## Unmatched ({len(unmatched)}) — facility not found in PSS/E")
         parts.append(_constraint_unmatched_table(unmatched, market="da"))
 
     interface = vm.get("interface_constraints", [])
@@ -447,25 +522,34 @@ def _format_rt_dart_morning_table(rows: list[dict]) -> str:
     """Wide table for morning_mode worst_binders — one row per constraint
     rolled up across the window."""
     headers = [
-        "Constraint", "Contingency", "kV", "Route", "Buses",
-        "RT $ (week)", "Days Bound", "HE Pattern", "Histogram",
+        "Constraint",
+        "Contingency",
+        "kV",
+        "Route",
+        "Buses",
+        "RT $ (week)",
+        "Days Bound",
+        "HE Pattern",
+        "Histogram",
     ]
     out = []
     for r in rows:
         bp = r.get("binding_he_pattern") or {}
         hist = bp.get("histogram") or [0] * 24
         glyph = "".join(_hist_glyph(int(c)) for c in hist)
-        out.append([
-            (r.get("constraint_name") or "-")[:28],
-            (r.get("contingency") or "-")[:28],
-            r.get("parsed_voltage_kv") or "-",
-            _constraint_route(r),
-            _bus_pair(r),
-            _money(r.get("rt_total_price_week")),
-            r.get("binding_day_count") or 0,
-            (bp.get("label") or "(none)")[:24],
-            glyph,
-        ])
+        out.append(
+            [
+                (r.get("constraint_name") or "-")[:28],
+                (r.get("contingency") or "-")[:28],
+                r.get("parsed_voltage_kv") or "-",
+                _constraint_route(r),
+                _bus_pair(r),
+                _money(r.get("rt_total_price_week")),
+                r.get("binding_day_count") or 0,
+                (bp.get("label") or "(none)")[:24],
+                glyph,
+            ]
+        )
     return _table(headers, out)
 
 
@@ -487,13 +571,9 @@ def format_constraints_rt_dart_network(vm: dict) -> str:
             f"({cov.get('match_rate_pct', 0)}%)"
         )
         if wb:
-            parts.append(
-                f"\n## Worst binders ({len(wb)}) — sorted by |RT $ over week|"
-            )
+            parts.append(f"\n## Worst binders ({len(wb)}) — sorted by |RT $ over week|")
             parts.append(_format_rt_dart_morning_table(wb))
-            parts.append(
-                "\n_HE histogram glyphs: `·` 0d  `.` 1d  `+` 2-4d  `#` ≥5d_"
-            )
+            parts.append("\n_HE histogram glyphs: `·` 0d  `.` 1d  `+` 2-4d  `#` ≥5d_")
         return "\n".join(parts)
 
     parts.append(
@@ -520,9 +600,7 @@ def format_constraints_rt_dart_network(vm: dict) -> str:
 
     ambiguous = vm.get("ambiguous_constraints", [])
     if ambiguous:
-        parts.append(
-            f"\n## Ambiguous ({len(ambiguous)}) — first PSS/E candidate shown"
-        )
+        parts.append(f"\n## Ambiguous ({len(ambiguous)}) — first PSS/E candidate shown")
         parts.append(_constraint_rt_dart_table(ambiguous, with_neighbors=True))
 
     unmatched = vm.get("unmatched_constraints", [])
@@ -539,14 +617,23 @@ def format_constraints_rt_dart_network(vm: dict) -> str:
 
 
 def _constraint_da_table(
-    rows: list[dict], *, with_neighbors: bool,
+    rows: list[dict],
+    *,
+    with_neighbors: bool,
     binding_hours: list[int] | None = None,
 ) -> str:
     if binding_hours:
         # Funnel mode — replace OnPk/OffPk $ cols with Binding HE $ summary
         headers = [
-            "Constraint", "Contingency", "kV", "Route", "Buses",
-            "Total $", "Binding HE $", "Hrs Bound", "MVA",
+            "Constraint",
+            "Contingency",
+            "kV",
+            "Route",
+            "Buses",
+            "Total $",
+            "Binding HE $",
+            "Hrs Bound",
+            "MVA",
         ]
         if with_neighbors:
             headers.append("Top Neighbors")
@@ -556,7 +643,8 @@ def _constraint_da_table(
             sum_str = (
                 f"{_money(r.get('binding_price'))} "
                 f"(HE{','.join(str(h) for h in sorted(bh.keys()))})"
-                if bh else "-"
+                if bh
+                else "-"
             )
             row = [
                 (r.get("constraint_name") or "-")[:30],
@@ -578,8 +666,16 @@ def _constraint_da_table(
 
     # Default mode — unchanged
     headers = [
-        "Constraint", "Contingency", "kV", "Route", "Buses",
-        "Total $", "Hrs", "OnPk $", "OffPk $", "MVA",
+        "Constraint",
+        "Contingency",
+        "kV",
+        "Route",
+        "Buses",
+        "Total $",
+        "Hrs",
+        "OnPk $",
+        "OffPk $",
+        "MVA",
     ]
     if with_neighbors:
         headers.append("Top Neighbors")
@@ -605,8 +701,17 @@ def _constraint_da_table(
 
 def _constraint_rt_dart_table(rows: list[dict], *, with_neighbors: bool) -> str:
     headers = [
-        "Date", "Constraint", "Contingency", "kV", "Route", "Buses",
-        "RT $", "RT Hrs", "DART $", "DART Hrs", "MVA",
+        "Date",
+        "Constraint",
+        "Contingency",
+        "kV",
+        "Route",
+        "Buses",
+        "RT $",
+        "RT Hrs",
+        "DART $",
+        "DART Hrs",
+        "MVA",
     ]
     if with_neighbors:
         headers.append("Top Neighbors")
@@ -676,24 +781,33 @@ def format_lmp_da_hub_summary(vm: dict) -> str:
     if hubs:
         parts.append("\n## Hubs — sorted by |onpeak congestion|")
         headers = [
-            "Hub", "OnPk Total", "OnPk Energy", "OnPk Cong", "Cong %",
-            "OffPk Total", "OffPk Cong",
-            "Peak HE", "Peak Total", "Peak Cong",
+            "Hub",
+            "OnPk Total",
+            "OnPk Energy",
+            "OnPk Cong",
+            "Cong %",
+            "OffPk Total",
+            "OffPk Cong",
+            "Peak HE",
+            "Peak Total",
+            "Peak Cong",
         ]
         rows = []
         for h in hubs:
-            rows.append([
-                h.get("hub", "-"),
-                _money_d(h.get("onpeak_total")),
-                _money_d(h.get("onpeak_energy")),
-                _money_d(h.get("onpeak_congestion")),
-                _pct(h.get("congestion_pct_of_total")),
-                _money_d(h.get("offpeak_total")),
-                _money_d(h.get("offpeak_congestion")),
-                h.get("peak_hour") or "-",
-                _money_d(h.get("peak_total")),
-                _money_d(h.get("peak_congestion")),
-            ])
+            rows.append(
+                [
+                    h.get("hub", "-"),
+                    _money_d(h.get("onpeak_total")),
+                    _money_d(h.get("onpeak_energy")),
+                    _money_d(h.get("onpeak_congestion")),
+                    _pct(h.get("congestion_pct_of_total")),
+                    _money_d(h.get("offpeak_total")),
+                    _money_d(h.get("offpeak_congestion")),
+                    h.get("peak_hour") or "-",
+                    _money_d(h.get("peak_total")),
+                    _money_d(h.get("peak_congestion")),
+                ]
+            )
         parts.append(_table(headers, rows))
 
     return "\n".join(parts)
@@ -723,24 +837,35 @@ def format_lmp_da_outage_overlap(vm: dict) -> str:
     # Summary table — one row per top constraint
     parts.append("\n## Constraints")
     sum_headers = [
-        "Constraint", "Contingency", "kV", "Route", "Buses",
-        "Total $", "Hrs", "Nbrs", "Active", "Starting", "Ending",
+        "Constraint",
+        "Contingency",
+        "kV",
+        "Route",
+        "Buses",
+        "Total $",
+        "Hrs",
+        "Nbrs",
+        "Active",
+        "Starting",
+        "Ending",
     ]
     sum_rows = []
     for c in constraints:
-        sum_rows.append([
-            (c.get("constraint_name") or "-")[:30],
-            (c.get("contingency") or "-")[:25],
-            c.get("parsed_voltage_kv") or "-",
-            _constraint_route(c),
-            _bus_pair(c),
-            _money(c.get("total_price")),
-            c.get("total_hours") or "-",
-            c.get("neighbor_count_k2_hv") or 0,
-            c.get("active_count") or "-",
-            c.get("starting_soon_count") or "-",
-            c.get("ending_soon_count") or "-",
-        ])
+        sum_rows.append(
+            [
+                (c.get("constraint_name") or "-")[:30],
+                (c.get("contingency") or "-")[:25],
+                c.get("parsed_voltage_kv") or "-",
+                _constraint_route(c),
+                _bus_pair(c),
+                _money(c.get("total_price")),
+                c.get("total_hours") or "-",
+                c.get("neighbor_count_k2_hv") or 0,
+                c.get("active_count") or "-",
+                c.get("starting_soon_count") or "-",
+                c.get("ending_soon_count") or "-",
+            ]
+        )
     parts.append(_table(sum_headers, sum_rows))
 
     # Per-constraint detail — only those with overlap
@@ -756,23 +881,35 @@ def format_lmp_da_outage_overlap(vm: dict) -> str:
                 f"{c.get('total_hours') or 0}h"
             )
             o_headers = [
-                "Bucket", "On", "Branch", "Facility", "kV",
-                "State", "Risk", "Start", "End", "Days→Ret",
+                "Bucket",
+                "On",
+                "Branch",
+                "Facility",
+                "kV",
+                "State",
+                "Risk",
+                "Start",
+                "End",
+                "Days→Ret",
             ]
             o_rows = []
             for o in c["outage_overlap"]:
-                o_rows.append([
-                    o.get("bucket"),
-                    o.get("on_branch"),
-                    (o.get("branch_label") or "-")[:30],
-                    (o.get("facility") or "")[:38],
-                    o.get("kv") or "-",
-                    o.get("outage_state") or "-",
-                    "Yes" if o.get("risk_flag") else "-",
-                    o.get("started") or "-",
-                    o.get("est_return") or "-",
-                    o.get("days_to_return") if o.get("days_to_return") is not None else "-",
-                ])
+                o_rows.append(
+                    [
+                        o.get("bucket"),
+                        o.get("on_branch"),
+                        (o.get("branch_label") or "-")[:30],
+                        (o.get("facility") or "")[:38],
+                        o.get("kv") or "-",
+                        o.get("outage_state") or "-",
+                        "Yes" if o.get("risk_flag") else "-",
+                        o.get("started") or "-",
+                        o.get("est_return") or "-",
+                        o.get("days_to_return")
+                        if o.get("days_to_return") is not None
+                        else "-",
+                    ]
+                )
             parts.append(_table(o_headers, o_rows))
     else:
         parts.append("\n_No outage overlaps in window._")
@@ -786,28 +923,40 @@ def _constraint_unmatched_table(rows: list[dict], *, market: str) -> str:
     if market == "da":
         headers = ["Constraint", "Contingency", "kV", "Total $", "Hrs", "Dialect"]
     else:
-        headers = ["Date", "Constraint", "Contingency", "kV", "RT $", "DART $", "Dialect"]
+        headers = [
+            "Date",
+            "Constraint",
+            "Contingency",
+            "kV",
+            "RT $",
+            "DART $",
+            "Dialect",
+        ]
     out = []
     for r in rows:
         if market == "da":
-            out.append([
-                (r.get("constraint_name") or "-")[:35],
-                (r.get("contingency") or "-")[:30],
-                r.get("parsed_voltage_kv") or "-",
-                _money(r.get("da_total_price")),
-                r.get("da_total_hours") or "-",
-                r.get("parser_dialect") or "?",
-            ])
+            out.append(
+                [
+                    (r.get("constraint_name") or "-")[:35],
+                    (r.get("contingency") or "-")[:30],
+                    r.get("parsed_voltage_kv") or "-",
+                    _money(r.get("da_total_price")),
+                    r.get("da_total_hours") or "-",
+                    r.get("parser_dialect") or "?",
+                ]
+            )
         else:
-            out.append([
-                r.get("date") or "-",
-                (r.get("constraint_name") or "-")[:32],
-                (r.get("contingency") or "-")[:28],
-                r.get("parsed_voltage_kv") or "-",
-                _money(r.get("rt_total_price")),
-                _money(r.get("dart_total_price")),
-                r.get("parser_dialect") or "?",
-            ])
+            out.append(
+                [
+                    r.get("date") or "-",
+                    (r.get("constraint_name") or "-")[:32],
+                    (r.get("contingency") or "-")[:28],
+                    r.get("parsed_voltage_kv") or "-",
+                    _money(r.get("rt_total_price")),
+                    _money(r.get("dart_total_price")),
+                    r.get("parser_dialect") or "?",
+                ]
+            )
     return _table(headers, out)
 
 
@@ -840,21 +989,28 @@ def format_lmps_daily_summary(vm: dict) -> str:
             f"\n## Hubs — vs peer ({hubs_with_peer[0]['vs_peer']['peer_date']})"
         )
         headers = [
-            "Hub", "OnPk Total", "OnPk Total Δ", "OnPk Cong", "OnPk Cong Δ",
-            "OffPk Total", "OffPk Total Δ",
+            "Hub",
+            "OnPk Total",
+            "OnPk Total Δ",
+            "OnPk Cong",
+            "OnPk Cong Δ",
+            "OffPk Total",
+            "OffPk Total Δ",
         ]
         rows = []
         for h in hubs_with_peer:
             vp = h["vs_peer"]
-            rows.append([
-                h.get("hub", "-"),
-                _money_d(h.get("onpeak_total")),
-                _signed_money_d(vp.get("onpeak_total_delta")),
-                _money_d(h.get("onpeak_congestion")),
-                _signed_money_d(vp.get("onpeak_congestion_delta")),
-                _money_d(h.get("offpeak_total")),
-                _signed_money_d(vp.get("offpeak_total_delta")),
-            ])
+            rows.append(
+                [
+                    h.get("hub", "-"),
+                    _money_d(h.get("onpeak_total")),
+                    _signed_money_d(vp.get("onpeak_total_delta")),
+                    _money_d(h.get("onpeak_congestion")),
+                    _signed_money_d(vp.get("onpeak_congestion_delta")),
+                    _money_d(h.get("offpeak_total")),
+                    _signed_money_d(vp.get("offpeak_total_delta")),
+                ]
+            )
         parts.append(_table(headers, rows))
 
     drilldown = vm.get("top_zones_for_drilldown") or []
@@ -958,9 +1114,7 @@ def format_lmps_hourly_summary(vm: dict) -> str:
         parts.append(_table(headers, rows))
 
     if binding:
-        parts.append(
-            f"\n_Tier 3 deep-dive: binding HEs **{binding}**._"
-        )
+        parts.append(f"\n_Tier 3 deep-dive: binding HEs **{binding}**._")
 
     return "\n".join(parts)
 
@@ -998,32 +1152,41 @@ def format_lmps_dart_realization(vm: dict) -> str:
         headers = ["Hub", "Σ|DART cong|", "Trend", "Peak HEs"]
         rows = []
         for w in worst:
-            rows.append([
-                w.get("hub", "-"),
-                _money_d(w.get("sum_abs_dart_cong")),
-                w.get("trend_signal", "-"),
-                ", ".join(f"HE{h}" for h in (w.get("peak_hours_of_day") or [])),
-            ])
+            rows.append(
+                [
+                    w.get("hub", "-"),
+                    _money_d(w.get("sum_abs_dart_cong")),
+                    w.get("trend_signal", "-"),
+                    ", ".join(f"HE{h}" for h in (w.get("peak_hours_of_day") or [])),
+                ]
+            )
         parts.append(_table(headers, rows))
 
     rollup = vm.get("hub_rollup") or []
     if rollup:
         parts.append("\n## Per-hub rollup")
         headers = [
-            "Hub", "Avg DART", "Max |DART|", "Worst Day",
-            "Hrs > Thr", "Σ|DART|", "Trend",
+            "Hub",
+            "Avg DART",
+            "Max |DART|",
+            "Worst Day",
+            "Hrs > Thr",
+            "Σ|DART|",
+            "Trend",
         ]
         rows = []
         for r in rollup:
-            rows.append([
-                r.get("hub", "-"),
-                _money_d(r.get("avg_dart_cong")),
-                _money_d(r.get("max_abs_dart_cong")),
-                r.get("max_dart_date") or "-",
-                r.get("hours_over_threshold", 0),
-                _money_d(r.get("sum_abs_dart_cong")),
-                r.get("trend_signal", "-"),
-            ])
+            rows.append(
+                [
+                    r.get("hub", "-"),
+                    _money_d(r.get("avg_dart_cong")),
+                    _money_d(r.get("max_abs_dart_cong")),
+                    r.get("max_dart_date") or "-",
+                    r.get("hours_over_threshold", 0),
+                    _money_d(r.get("sum_abs_dart_cong")),
+                    r.get("trend_signal", "-"),
+                ]
+            )
         parts.append(_table(headers, rows))
 
     drilldown = vm.get("top_zones_for_drilldown") or []
@@ -1071,26 +1234,39 @@ def format_historical_outages_for_constraints(vm: dict) -> str:
         rows = []
         for o in group:
             labels = o.get("near_constraint_labels") or []
-            near = "; ".join(labels[:2]) if labels else \
-                ", ".join(str(b) for b in (o.get("near_constraint_buses") or []))
+            near = (
+                "; ".join(labels[:2])
+                if labels
+                else ", ".join(str(b) for b in (o.get("near_constraint_buses") or []))
+            )
             still = "active" if o.get("still_active_at_run") else "ended"
-            rows.append([
-                f"{o.get('persistence_days', 0)}d {still}",
-                o.get("kv") or "-",
-                o.get("equip_category", o.get("equip", "")),
-                (o.get("facility") or "")[:36],
-                _route(o),
-                o.get("from_bus_psse", "-"),
-                o.get("to_bus_psse", "-"),
-                o.get("started", "-"),
-                o.get("est_return", "-"),
-                (near or "-")[:36],
-            ])
+            rows.append(
+                [
+                    f"{o.get('persistence_days', 0)}d {still}",
+                    o.get("kv") or "-",
+                    o.get("equip_category", o.get("equip", "")),
+                    (o.get("facility") or "")[:36],
+                    _route(o),
+                    o.get("from_bus_psse", "-"),
+                    o.get("to_bus_psse", "-"),
+                    o.get("started", "-"),
+                    o.get("est_return", "-"),
+                    (near or "-")[:36],
+                ]
+            )
         return rows
 
     headers = [
-        "Persistence", "kV", "Type", "Facility", "Route",
-        "From", "To", "Started", "Est Return", "Near Constraint",
+        "Persistence",
+        "kV",
+        "Type",
+        "Facility",
+        "Route",
+        "From",
+        "To",
+        "Started",
+        "Est Return",
+        "Near Constraint",
     ]
     if sustained:
         parts.append(f"\n## Sustained ({len(sustained)}) — active ≥5 days in window")
@@ -1131,9 +1307,17 @@ def format_transmission_outages_for_constraints(vm: dict) -> str:
         return "\n".join(parts)
 
     headers = [
-        "Region", "Facility", "Type", "kV", "Route",
-        "From Bus", "To Bus", "State",
-        "Started", "Days Out", "Days Left",
+        "Region",
+        "Facility",
+        "Type",
+        "kV",
+        "Route",
+        "From Bus",
+        "To Bus",
+        "State",
+        "Started",
+        "Days Out",
+        "Days Left",
         "Near Constraint",
     ]
     rows = []
@@ -1143,20 +1327,115 @@ def format_transmission_outages_for_constraints(vm: dict) -> str:
             near = "; ".join(labels[:2])  # cap to 2 for table width
         else:
             near = ", ".join(str(b) for b in (o.get("near_constraint_buses") or []))
-        rows.append([
-            o.get("region", "-"),
-            (o.get("facility") or "")[:36],
-            o.get("equip_category", o.get("equip", "")),
-            o.get("kv") or "-",
-            _route(o),
-            o.get("from_bus_psse", "-"),
-            o.get("to_bus_psse", "-"),
-            o.get("outage_state", "-"),
-            o.get("started", "-"),
-            o.get("days_out") if o.get("days_out") is not None else "-",
-            o.get("days_to_return") if o.get("days_to_return") is not None else "overdue",
-            (near or "-")[:40],
-        ])
+        rows.append(
+            [
+                o.get("region", "-"),
+                (o.get("facility") or "")[:36],
+                o.get("equip_category", o.get("equip", "")),
+                o.get("kv") or "-",
+                _route(o),
+                o.get("from_bus_psse", "-"),
+                o.get("to_bus_psse", "-"),
+                o.get("outage_state", "-"),
+                o.get("started", "-"),
+                o.get("days_out") if o.get("days_out") is not None else "-",
+                o.get("days_to_return")
+                if o.get("days_to_return") is not None
+                else "overdue",
+                (near or "-")[:40],
+            ]
+        )
     parts.append(_table(headers, rows))
 
+    return "\n".join(parts)
+
+
+# ─── Hub buses (agg_definitions bridge) ──────────────────────────────────────
+
+
+def format_hub_buses_detail(vm: dict) -> str:
+    """Single-aggregate detail: header + ranked bus list with factors."""
+    parts: list[str] = []
+    if not vm.get("found"):
+        parts.append(f"### Hub buses — {vm.get('hub_name', '?')}")
+        parts.append("")
+        parts.append(
+            "Aggregate not found in `pjm_agg_definitions_active`. Check the name."
+        )
+        return "\n".join(parts)
+
+    parts.append(f"### {vm['hub_name']}")
+    parts.append("")
+    parts.append(
+        f"- **Type:** {vm['agg_pnode_type']}  "
+        f"\n- **Aggregate ID:** {vm['agg_pnode_id']}  "
+        f"\n- **Buses:** {vm['bus_count']}  "
+        f"\n- **Factor sum:** {vm['factor_sum']:.4f}"
+    )
+    parts.append("")
+
+    headers = ["#", "Bus pnode ID", "Bus name", "Factor"]
+    rows = [
+        [i + 1, b["bus_pnode_id"], b["bus_pnode_name"], f"{b['bus_pnode_factor']:.6f}"]
+        for i, b in enumerate(vm["buses"])
+    ]
+    parts.append(_table(headers, rows))
+    return "\n".join(parts)
+
+
+def format_hub_buses_summary(vm: dict) -> str:
+    """Discovery summary: one row per aggregate with bus_count and factor_sum."""
+    parts: list[str] = []
+    type_label = vm.get("agg_pnode_type_filter") or "ALL"
+    parts.append(f"### Aggregates summary — type={type_label}")
+    parts.append("")
+    parts.append(f"**{vm['aggregate_count']} aggregates** matched.")
+    parts.append("")
+
+    headers = ["Aggregate", "Type", "ID", "Buses", "Factor sum"]
+    rows = [
+        [
+            a["agg_pnode_name"],
+            a["agg_pnode_type"],
+            a["agg_pnode_id"],
+            a["bus_count"],
+            f"{a['factor_sum']:.4f}" if a["factor_sum"] is not None else "-",
+        ]
+        for a in vm["aggregates"]
+    ]
+    parts.append(_table(headers, rows))
+    return "\n".join(parts)
+
+
+# ─── Hub impact (DC shift-factor lookup) ─────────────────────────────────────
+
+
+def format_hub_impact(vm: dict) -> str:
+    """Single-branch hub-LMP impact lookup result."""
+    parts: list[str] = []
+    parts.append(
+        f"### Hub impact — {vm.get('hub_name', '?')} on branch "
+        f"({vm['from_bus']}, {vm['to_bus']})"
+    )
+    parts.append("")
+    if not vm.get("matched"):
+        parts.append(vm.get("note", "Hub or branch not in cache."))
+        return "\n".join(parts)
+
+    fields = [
+        ("Hub", vm.get("hub_name", "?")),
+        ("Equipment", vm.get("equipment_type", "?")),
+        ("Circuit", vm.get("ckt_id", "?")),
+        ("Parallel circuits", vm.get("n_parallel_circuits", 1)),
+        ("Hub ISF", f"{vm['hub_isf']:+.5f}"),
+        ("Magnitude class", vm.get("magnitude_class", "?")),
+    ]
+    if vm.get("shadow_price") is not None:
+        fields += [
+            ("Shadow price ($/MWh)", f"{vm['shadow_price']:.2f}"),
+            ("Hub LMP impact ($/MWh)", f"{vm['hub_lmp_impact_dollars_per_mwh']:+.2f}"),
+        ]
+
+    for k, v in fields:
+        parts.append(f"- **{k}:** {v}")
     return "\n".join(parts)
