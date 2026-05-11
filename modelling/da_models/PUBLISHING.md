@@ -70,7 +70,9 @@ so a sweep over many dates doesn't write a row per date.
 
 ## Registry
 
-One row per `forecast_single_day*.py` under `modelling/da_models/`.
+One row per `model_name`. Most models are published by a single
+`pipelines/forecast_single_day*.py`; `baseline_meteo_da_price` is published by
+two pipelines (see notes).
 
 | model_family | model_name | run_date | target_date | da_lmp_total_onpeak_forecast | payload (top-level keys) | run_id | created_at / updated_at | status |
 |---|---|---|---|---|---|---|---|---|
@@ -78,11 +80,14 @@ One row per `forecast_single_day*.py` under `modelling/da_models/`.
 | `like_day` | `meteo_rto_hourly` | same | same | same as above | same as above (Meteologica-fed pool) | `uuid4()` per run | same | publishes |
 | `like_day` | `pjm_rto_hourly_sunny` | same | same | same as above | same as above (sunny spec; `like_day_model_knn_sunny/publish.py`) | `uuid4()` per run | same | wired this pass |
 | `baseline` | `baseline_meteo_da_price_ice_anchored` | `run()`'s `run_date` arg, default `date.today()` | `target_date` arg, default tomorrow | `blocks[]` row `block='OnPeak'`, `series='Det'` | `lead_days, det_executed_local, ens_executed_local, ice_anchor{...}, hourly[], blocks[], ice_trades[]` + the common keys | `uuid4()` per run | same | publishes |
-| `baseline` | `baseline_meteo_da_price` | same | same | `blocks[]` row `block='OnPeak'`, `series='Det'` | same as the anchored payload, but `ice_anchor.applied=False` and `ice_trades=[]` (no anchor) | `uuid4()` per run | same | wired this pass |
+| `baseline` | `baseline_meteo_da_price` | `run_date` arg, default `date.today()` | `forecast_single_day.py`: tomorrow (lead 1) · `forecast_next_7_days.py`: `run_date+1 .. run_date+7` (leads 1..7), capped at `HORIZON_DAYS` | `blocks[]` row `block='OnPeak'`, `series='Det'` | `lead_days, det_executed_local, ens_executed_local, ice_anchor{...}, hourly[], blocks[], ice_trades[]` + the common keys; `ice_anchor.applied=False`, `ice_trades=[]` (no anchor — both pipelines reuse `baseline_meteo_da_price/publish.py`'s `build_payload`) | `uuid4()` per run; `forecast_next_7_days.py` uses **one `run_id` for the whole 7-day batch** (PK stays unique because `target_date` differs) | same | wired this pass |
 
 Not in the table:
 - `modelling/da_models/naive_baselines/` — being removed; not wired.
 - (`like_day_model_knn_sunny/meteo_regional_hourly/` was removed during the wiring pass — it had a `forecast_single_day.py` + a `head_to_head.py` comparison harness; both gone.)
+
+Notes:
+- **`baseline_meteo_da_price` has two publishers.** `pipelines/forecast_single_day.py` publishes the next-day forecast (lead 1) alongside its rich per-hour detail tables; `pipelines/forecast_next_7_days.py` publishes the forward horizon (leads 1..7, one `run_id` per batch). The lead-1 row gets written by both with distinct `run_id`s — "latest by `created_at`" dedupes for readers, and the content is identical (same Meteo vintage). The ICE-anchored `forecast_single_day_ice_anchored.py` stays single-day (the ICE PDA D1-IUS anchor is the next-day product).
 
 ## Adding a new forecaster
 
