@@ -1,0 +1,30 @@
+name: helioscta-positions-and-trades
+
+prefect-version: 3.0.0
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+
+  # ────── Clear Street Trades ──────
+  # Daily rebuild of clear_street_trades + scorecard after the sister
+  # helioscta-backend repo's overnight SFTP ingest. Pure dbt run — no
+  # ingest task in this repo.
+
+  - name: Clear Street Trades
+    entrypoint: schedulers/prefect/positions_and_trades/clear_street_trades_flows.py:clear_street_trades
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    tags: [positions_and_trades, clear_street, trades]
+    schedules:
+
+      # ────── Daily run at 5:00 AM MST (7:00 AM EPT) ──────
+      # Buffer after sister repo's overnight SFTP ingest completes.
+      - cron: "0 5 * * *"
+        timezone: "America/Denver"

@@ -1,0 +1,48 @@
+version: 2
+
+models:
+
+  - name: clear_street_trades
+    description: "Clear Street overnight trade fills, DA-only and slim. One row per fill (parent + allocation children). Carries the give-in/give-out allocation chain plus delivery_date and ice_product_code as the JOIN keys into ICE marts and the DA scorecard. ~28 columns vs ~85 in the upstream Clear Street feed; all fee/commission/options/internal-broker columns are intentionally dropped."
+    columns:
+      - name: sftp_date
+        description: "Date the SFTP file was deposited. The (sftp_date, sftp_upload_timestamp) pair is the canonical fill set after the LATEST_SFTP_UPLOAD_TIMESTAMP dedupe."
+      - name: trade_date
+        description: "Trade execution date as reported by the exchange."
+      - name: delivery_date
+        description: "Calendar delivery date of the contract, derived as make_date(contract_year, contract_month, contract_day). Joins to ice_python_ticker_data_by_delivery.start_date and to scorecard_da_onpeak_wh.delivery_date."
+      - name: ice_product_code
+        description: "ICE ticker the contract maps to: 'PDA D1-IUS' for weekday DA, 'PDO P1-IUS' for weekend DA. Same literal regardless of delivery_date. Use (ice_product_code, delivery_date) as the compound JOIN key against ice_python_ticker_data_by_delivery.(symbol, start_date)."
+      - name: account_number_cleaned
+        description: "Helios' Clear Street firm code (always 'HELIOS' after the GHELI normalization)."
+      - name: give_in_out_code
+        description: "Allocation direction. 'GO' for give-out (parent trade allocated to a child clearing firm); NULL for the parent trade itself."
+      - name: give_in_out_firm_num
+        description: "Receiving clearing firm code (e.g. 'EFD'=ACIM, 'RJO'=DICKSON, 'ADU'=TITAN, 'FCR'=PNT). Joins to utils_v1_positions_and_trades_accounts_lookup.account."
+      - name: account_name
+        description: "Friendly account name resolved from give_in_out_firm_num. NULL for unmapped firm codes (data-quality canary)."
+      - name: executing_broker
+        description: "Broker that executed the order on the exchange."
+      - name: opposing_broker
+        description: "Counterparty broker on the trade."
+      - name: exch_comm_cd
+        description: "Exchange-commodity code. DA-scope: 'PDA' (weekday DA on-peak) or 'PDO' (weekend DA off-peak)."
+      - name: exchange_name_cleaned
+        description: "Canonical exchange name. For DA-scope always 'IFED' (NYM/IFE/IPE all collapse to it)."
+      - name: product_code_grouping
+        description: "Product taxonomy bucket from utils_v1_positions_and_trades_product_lookup. For DA-scope always 'POWER_FUTURES'."
+      - name: product_code_region
+        description: "Region from product_lookup. For DA-scope always 'PJM'."
+      - name: contract_year_month
+        description: "Contract YYYYMM (integer)."
+      - name: contract_day
+        description: "Day of the contract month (from prompt_day) for daily strips like PDA D1."
+      - name: buy_sell_cleaned
+        description: "'B' for buys, 'S' for sells (from the raw 1/2 codes)."
+      - name: quantity_cleaned
+        description: "Signed quantity: positive for buys, negative for sells."
+      - name: trade_price
+        description: "Fill price as reported by Clear Street."
+      - name: settlement_price
+        description: "Exchange settle for the contract on trade_date."
+

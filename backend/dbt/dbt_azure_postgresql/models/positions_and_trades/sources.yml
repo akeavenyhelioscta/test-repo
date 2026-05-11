@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+
+  - name: clear_street_v2
+    schema: clear_street
+    description: "Clear Street SFTP feeds. Overnight transaction confirmations land here as a versioned table per snapshot."
+    tables:
+      - name: helios_transactions_v2_2026_feb_23
+        description: "Clear Street SFTP overnight trade confirmations. One row per (sftp_date, sftp_upload_timestamp, trade_id). Latest sftp_upload_timestamp per sftp_date is the canonical fill set; earlier intraday uploads are superseded."

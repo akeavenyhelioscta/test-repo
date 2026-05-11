@@ -61,3 +61,12 @@ models:
         +materialized: ephemeral
       marts:
         +materialized: ephemeral
+
+    scorecards:
+      +materialized: view
+
+    positions_and_trades:
+      +materialized: ephemeral
+      trades_cleaned:
+        marts:
+          +materialized: view
