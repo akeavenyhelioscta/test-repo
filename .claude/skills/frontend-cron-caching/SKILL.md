@@ -1,3 +1,8 @@
+---
+name: frontend-cron-caching
+description: Standards for cron jobs and data endpoints in `frontend/`. Use when adding a `frontend/vercel.json` `crons[]` entry, scaffolding a route handler under `frontend/app/api/cron/*`, building a data endpoint that needs to be fast for the browser, or designing a Postgres-backed `*_snapshot` table the frontend reads. Covers vercel.json schedule + function config, the canonical cron handler shape (auth + thin glue), snapshot-table contract, single-writer rule, and the read-path conventions (read snapshots only, surface `lastRefreshed`).
+---
+
 # Frontend cron + caching conventions
 
 Standards for adding scheduled work and data endpoints in `frontend/`.

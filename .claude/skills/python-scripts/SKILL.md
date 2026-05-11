@@ -1,3 +1,8 @@
+---
+name: python-scripts
+description: Standards for runnable Python scripts in this repo (anything with a `__main__` block or meant to be invoked directly). Use when scaffolding a new script, adding a `__main__` block, or substantially modifying a run-directly module — covers entry-point shape, argparse policy, sys.path bootstrap, ASCII-only console output, table formatting (to_string vs tabulate), type hints, run-id artefact naming, and the `quiet` harness contract.
+---
+
 # Python script conventions
 
 Standards for runnable Python scripts in this repo (e.g.
