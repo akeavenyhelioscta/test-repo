@@ -11,10 +11,12 @@ PJM day-ahead market modelling and data infrastructure. Active focus:
 - `frontend/` — Next.js 15 / React 19 dashboard deployed to Vercel,
   reads Postgres marts directly. See `frontend/CLAUDE.md` for layout,
   conventions, and styling/cron skills.
-- `backend/` — dbt project (`backend/dbt/`), MCP server
-  (`backend/mcp_server/`), Prefect orchestration, shared cache
-  (`backend/cache/`), and `backend/modelling/` — the scheduled home for
-  forecasters promoted out of `modelling/`. See `backend/modelling/README.md`.
+- `backend/` — dbt project (`backend/dbt/dbt_azure_postgresql/`), MCP
+  server (`backend/mcp_server/`), Prefect orchestration
+  (`backend/schedulers/`), shared cache (`backend/cache/`), and
+  `backend/modelling/` — the scheduled home for forecasters promoted out
+  of `modelling/`. See `backend/CLAUDE.md` for the subtree map and dbt
+  conventions; `backend/modelling/README.md` for the forecaster tree.
 - `fundies/` — fundamentals research notes (markdown).
 - `azure-infra/` — provisioning shell scripts.
 - `scratch/` — throwaway diagnostics, not on the production path.
@@ -42,10 +44,14 @@ but the frontend can't see it" class of bug.
     `publish_forecast_run` in
     `backend/modelling/da_models/common/publish.py`, which delegates
     DDL + write to `backend.utils.azure_postgresql_utils` (creates the
-    schema/table on first run). Pipelines compose `build_payload ->
-    extract_onpeak_forecast -> publish_forecast_run`; the Prefect
-    deployment `backend/schedulers/prefect/modelling/pjm/da_forecasts_daily`
-    drives them. See `backend/modelling/README.md`.
+    schema/table on first run). Each family runs a standalone
+    data-validation preflight first (it aborts the run on bad input
+    before anything is published), then composes `build_payload ->
+    extract_onpeak_forecast -> publish_forecast_run`. The Prefect
+    deployments are one yaml per family under
+    `backend/schedulers/prefect/modelling/da_models/`
+    (`baseline_da_price_forecasts.yaml`, `like_day_pjm_rto_hourly.yaml`).
+    See `backend/modelling/README.md`.
   - **Readers**: `frontend/lib/server/forecastRuns.ts`
     (`listForecastRuns`, `readForecastRun`,
     `readLatestForecastRun`). Frontend tabs follow the canonical
@@ -66,8 +72,9 @@ When recording a fact, route by **scope**:
 - **Repo-wide truth** (top-level layout, the routing rule itself) →
   this file. Always loaded.
 - **Subtree-specific convention** (Python loader rules, frontend
-  layout) → a nested `<subtree>/CLAUDE.md`. Loads only when working
-  in that subtree.
+  layout, dbt model organization) → a nested `<subtree>/CLAUDE.md`
+  (`modelling/`, `frontend/`, `backend/`). Loads only when working in
+  that subtree.
 - **Conditionally-relevant standards** (apply only when doing X kind
   of work — scaffolding a Python script, writing a cron handler,
   styling a component) → a skill under `.claude/skills/<name>/SKILL.md`.

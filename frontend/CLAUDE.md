@@ -46,11 +46,10 @@ or the home grid yet. Re-adding a "soon" entry is a one-line change in
 - **Secrets.** Server-only env vars must not be `NEXT_PUBLIC_*`
   prefixed. DB connection strings, API keys, blob SAS tokens — all
   consumed inside `lib/server/`.
-- **Styling.** Tailwind utility classes only — no CSS modules or
-  styled-components. Reach for `clsx` / `cva` if class composition
-  gets unwieldy. Theme is set in `frontend/app/globals.css` +
-  `frontend/app/layout.tsx`. For colors, fonts, palette extension,
-  and chart tokens, use the `frontend-styling` skill.
+- **Styling.** Single dark theme (no light mode); theme tokens live in
+  `frontend/app/globals.css` + `frontend/app/layout.tsx`. For colors,
+  fonts, palette extension, chart tokens, and the Tailwind-only rule,
+  use the `frontend-styling` skill.
 - **Linting.** `npm run lint` (default `eslint-config-next`) must
   pass before commit. Don't loosen the ruleset without a written
   reason.
@@ -58,9 +57,15 @@ or the home grid yet. Re-adding a "soon" entry is a one-line change in
   handlers, a new entry in `frontend/vercel.json`, or any data
   endpoint that needs to be fast, use the `frontend-cron-caching`
   skill.
-- **Vercel project setup.** Root Directory, env vars, and
-  deploy-time config are covered in the `vercel-project-setup`
-  skill.
+- **Vercel project setup.** Root Directory is `frontend` (set in the
+  Vercel dashboard so the Python tree is excluded from builds). Cron
+  jobs / function regions / max durations are declared in
+  `frontend/vercel.json` once endpoints exist — no `vercel.json` is
+  required for the blank-page deploy; see the `frontend-cron-caching`
+  skill for the schedule + function config. Env vars are managed in
+  the dashboard, scoped per environment, mirrored locally in
+  `frontend/.env.local` (gitignored) — server-only vars must not be
+  `NEXT_PUBLIC_*` prefixed (see Secrets above).
 - **Verifying changes.** Any edit that affects what the browser
   renders — components, route handlers, type changes, blob/DB
   readers, chart series, table rows — must close with the
