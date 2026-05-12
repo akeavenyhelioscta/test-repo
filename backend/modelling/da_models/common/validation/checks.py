@@ -300,3 +300,59 @@ def check_freshness(
             f"({cutoff})",
         )
     return _ok(name, f"newest {as_of_col} is {newest}")
+
+
+# A Meteologica publish more than this many hours behind the reference time is
+# flagged — the run's "as of" looks fine on a re-run of stale data, but the
+# execution timestamp doesn't lie about when the model actually ran.
+FORECAST_EXEC_WARN_HOURS: int = 36
+
+
+def check_forecast_execution_recent(
+    name: str,
+    df: pd.DataFrame,
+    *,
+    exec_cols: Sequence[str],
+    reference: "pd.Timestamp | date | None" = None,
+    max_age_hours: int = FORECAST_EXEC_WARN_HOURS,
+    severity: CheckStatus = CheckStatus.WARN,
+) -> CheckResult:
+    """Flag a stale (or missing) forecast-execution timestamp.
+
+    ``exec_cols`` are the candidate timestamp columns (e.g. the deterministic
+    and ENS execution-datetime columns); the newest non-null value across all
+    of them is taken as "when this forecast ran". WARN by default — the
+    timestamp is a provenance field, not a load-bearing input — but callers
+    that treat a stale publish as a hard stop can pass ``severity=ERROR``.
+
+    A missing/empty timestamp is the given ``severity`` too: a Meteologica
+    frame with no execution stamp is suspicious enough to surface.
+    """
+    present = [c for c in exec_cols if c in df.columns]
+    if not present:
+        return CheckResult(
+            name, severity, f"none of {list(exec_cols)} present in frame"
+        )
+    stamps = pd.concat(
+        [pd.to_datetime(df[c], errors="coerce") for c in present], ignore_index=True
+    ).dropna()
+    if stamps.empty:
+        return CheckResult(name, severity, f"{present} present but all values NaT")
+    newest = stamps.max()
+    ref = pd.Timestamp(reference) if reference is not None else pd.Timestamp.now()
+    # Both are naive local timestamps in this codebase; if the data carries tz
+    # info and the reference doesn't (or vice versa), fall back to a tz-naive
+    # comparison rather than raising.
+    if newest.tzinfo is not None and ref.tzinfo is None:
+        newest = newest.tz_localize(None)
+    elif newest.tzinfo is None and ref.tzinfo is not None:
+        ref = ref.tz_localize(None)
+    age_hours = (ref - newest).total_seconds() / 3600.0
+    if age_hours > max_age_hours:
+        return CheckResult(
+            name,
+            severity,
+            f"newest execution {newest} is {age_hours:,.1f}h behind {ref} "
+            f"(> {max_age_hours}h)",
+        )
+    return _ok(name, f"newest execution {newest} ({age_hours:,.1f}h ago)")

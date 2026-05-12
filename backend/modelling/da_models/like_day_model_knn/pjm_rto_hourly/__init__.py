@@ -1,1 +1,1 @@
-"""pjm_rto_hourly - 3-hour window per target HE x per-hour matching (AnEn-NWP-style)."""
+"""pjm_rto_hourly — scalar per-HE matching, sum-Euclidean."""

@@ -1,0 +1,35 @@
+name: helioscta-modelling-pjm-like-day
+
+prefect-version: 3.0.0
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+
+  # ────── Like-Day -- pjm_rto_hourly ──────
+  # Preflight (like_day_model_knn/data_validation/forecast_single_day) then
+  # publish tomorrow's hourly DA-LMP like-day analog forecast to
+  # pjm_model_outputs.forecast_runs.
+
+  - name: PJM Like-Day pjm_rto_hourly
+    entrypoint: schedulers/prefect/modelling/da_models/like_day_pjm_rto_hourly_flows.py:like_day_pjm_rto_hourly
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    tags: [pjm, modelling, da_price, like_day, pjm_rto_hourly]
+    schedules:
+
+      # ────── Every 30 min, 05:00-11:00 MST ──────
+      # MST = America/Phoenix (no DST). Each run uses the latest settled DA-LMP /
+      # RT-load / weather / solar / wind in backend/cache/; latest-by-created_at
+      # dedupes for the frontend, so re-running through the morning just refreshes
+      # the forecast as new data lands.
+      - cron: "0,30 5-9 * * *"
+        timezone: "America/Phoenix"
+      - cron: "0 10 * * *"
+        timezone: "America/Phoenix"

@@ -18,13 +18,14 @@ Prefect schedule. It is a near-pure relocation of `modelling/da_models/`:
   `backend/modelling/` is the **sole writer** of that table; the `modelling/`
   tree at the repo top is research/compute-only and writes nothing.
 - **Family-import rule still holds**: a family (`baseline_meteo_da_price`,
-  `like_day_model_knn`, `like_day_model_knn_sunny`) may import from
-  `common/`, never from a sibling family.
+  `like_day_model_knn`) may import from `common/`, never from a sibling family.
 
 `modelling/` (top of repo) stays as the research / standalone tree — the
-two copies coexist for now. The scheduled deployment lives at
-`backend/schedulers/prefect/modelling/pjm/da_forecasts_daily.{yaml,_flows.py}`
-and runs each family's single-day `run(publish=True)` daily.
+two copies coexist for now. The scheduled deployments live under
+`backend/schedulers/prefect/modelling/da_models/` — one yaml per family
+(`baseline_da_price_forecasts.yaml`, `like_day_pjm_rto_hourly.yaml`); each
+deployment runs the pipeline's data-validation preflight first, then
+`run(publish=True)`. See the "Preflight data validation" section below.
 
 Run a forecaster directly:
 
@@ -34,41 +35,51 @@ python -m backend.modelling.da_models.baseline_meteo_da_price.pipelines.forecast
 
 ## Preflight data validation
 
-Each family has a `preflight.py` next to its `pipelines/` — a **standalone**
-input check that runs *before* the forecast and is never imported by the
-forecast pipeline (so a bad-data abort never half-runs a forecast, and the two
-have separate change-cycles).
-
-A preflight loads exactly the inputs that family's forecast consumes (via
-`common/data/loader.py` — it never re-reads parquet itself), runs a battery of
-checks, prints a per-check report, and raises
+Each forecast pipeline has a **standalone** preflight that runs *before* it and
+is never imported by it (so a bad-data abort never half-runs a forecast, and the
+two have separate change-cycles). A preflight loads exactly the inputs its
+pipeline consumes (via `common/data/loader.py` — it never re-reads parquet
+itself), runs a battery of checks, prints a per-check report, and raises
 `common.validation.DataValidationError` if anything reached ERROR severity. It
 collects **all** results before deciding to raise, so one run surfaces every
 problem. Exit code is 0 when healthy, non-zero on failure.
 
-- Checks live once in `common/validation/` (`checks.py` primitives,
-  `runner.py` `run_checks` / `ValidationReport` / `print_report`,
-  `errors.py` `DataValidationError`). The package imports no model family —
-  keep it that way.
-- Two severities: **ERROR** aborts (missing target date, all-NaN series, wrong
-  vintage, out-of-range $/MWh, stale feature feed); **WARN** is printed but does
-  not abort (e.g. a known source double-publish the analog pool's `pivot_table`
-  mean absorbs, an aged-but-present vintage).
-- Sanity bounds (`DA_LMP_MIN_USD` / `MAX_USD`, `LOAD_MW_*`, `NET_LOAD_MW_*`,
-  `FRESHNESS_WARN_DAYS`) are deliberately wide constants in `checks.py` —
-  tighten when a real bug slips through.
+Layout:
+
+- Checks live once in `common/validation/` (`checks.py` primitives — including
+  `check_forecast_execution_recent`, `check_freshness`, `check_row_count_per_day`,
+  …; `runner.py` `run_checks` / `ValidationReport` / `print_report`; `errors.py`
+  `DataValidationError`). The package imports no model family — keep it that way.
+- `<family>/data_validation/` — one script per forecast pipeline, named after
+  the pipeline's `forecast_*.py`. `baseline_meteo_da_price/data_validation/` has
+  `forecast_single_day_ice_anchored` + `forecast_next_14_days` plus a `_shared.py`
+  (`meteo_single_day_specs` + the constants the pipelines mirror — kept separate
+  so the two single-day variants don't drift). `like_day_model_knn/data_validation/`
+  has `forecast_single_day` (covers the DA-LMP label pool, the SEP alt label
+  source, the PJM calendar incl. the target-date row, and the RT-load / weather /
+  solar / wind hourly feeds; the softer per-domain feeds in `domains.py` degrade
+  gracefully and are left for later — there's a TODO in that file). One pipeline
+  in that family today, so no `_shared.py` there yet.
+
+Two severities: **ERROR** aborts (missing target date, all-NaN series, wrong
+vintage, out-of-range $/MWh, an incomplete forward delivery date, a stale feature
+feed); **WARN** is printed but does not abort (a stale forecast-execution stamp,
+an aged-but-present vintage, a known source double-publish the analog pool's
+`pivot_table` mean absorbs, ICE-ticker gaps the ICE-anchored pipeline already
+falls back from). Sanity bounds (`DA_LMP_MIN_USD` / `MAX_USD`, `LOAD_MW_*`,
+`NET_LOAD_MW_*`, `FRESHNESS_WARN_DAYS`, `FORECAST_EXEC_WARN_HOURS`) are
+deliberately wide constants in `checks.py` — tighten when a real bug slips
+through.
 
 Run a preflight directly:
 
 ```
-python -m backend.modelling.da_models.baseline_meteo_da_price.preflight
-python -m backend.modelling.da_models.like_day_model_knn_sunny.preflight
+python -m backend.modelling.da_models.baseline_meteo_da_price.data_validation.forecast_single_day_ice_anchored
+python -m backend.modelling.da_models.baseline_meteo_da_price.data_validation.forecast_next_14_days
+python -m backend.modelling.da_models.like_day_model_knn.data_validation.forecast_single_day
 ```
 
-The `like_day_model_knn_sunny` preflight currently covers the highest-leverage
-inputs (DA LMP label pool, SEP, the PJM calendar incl. the target-date row, and
-the RT-load / weather / solar / wind hourly feeds the analog query row needs);
-the softer per-domain feeds in `like_day_model_knn_sunny/domains.py` degrade
-gracefully and are left for later (there's a TODO in that `preflight.py`). The
-Prefect `da_forecasts_daily` flow can add a preflight task upstream of each
-forecast task later — out of scope here.
+The Prefect deployments run the matching preflight as the first task, so a bad
+input fails the run before anything is published — `baseline_da_price_forecasts.yaml`
+(the 14-day and ICE-anchored baseline) and `like_day_pjm_rto_hourly.yaml` under
+`backend/schedulers/prefect/modelling/da_models/`.

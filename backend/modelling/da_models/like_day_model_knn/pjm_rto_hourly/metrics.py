@@ -1,7 +1,9 @@
 """Probabilistic forecast evaluation metrics.
 
-Ported from helioscta-pjm-da/backend/src/like_day_forecast/evaluation/metrics.py
-to keep the terminal report numbers comparable. GEFCom2014 conventions.
+Duplicated from ``like_day_model_knn/pjm_rto_hourly/metrics.py`` to keep
+the cross-family import rule clean (this package imports from common/ only).
+GEFCom2014 conventions; numbers are directly comparable to the sibling
+package's terminal report.
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 def rmae(y_true: np.ndarray, y_pred: np.ndarray, y_naive: np.ndarray) -> float:
-    """Relative MAE: MAE(model) / MAE(naive). <1 means model beats naive."""
     mae_model = float(np.mean(np.abs(y_true - y_pred)))
     mae_naive = float(np.mean(np.abs(y_true - y_naive)))
     if mae_naive == 0:
@@ -39,12 +40,10 @@ def mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def coverage(y_true: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> float:
-    """% of actuals within [lower, upper]."""
     return float(np.mean((y_true >= lower) & (y_true <= upper)))
 
 
 def sharpness(lower: np.ndarray, upper: np.ndarray) -> float:
-    """Average prediction interval width."""
     return float(np.mean(upper - lower))
 
 
@@ -61,8 +60,8 @@ def crps(y_true: np.ndarray, y_pred_df: pd.DataFrame, quantiles: list[float]) ->
     if len(losses) < 2:
         return float("nan")
     losses.sort(key=lambda x: x[0])
-    qs = [item[0] for item in losses]
-    pls = [item[1] for item in losses]
+    qs = [v[0] for v in losses]
+    pls = [v[1] for v in losses]
     return float(np.trapz(pls, qs))
 
 
@@ -72,10 +71,10 @@ def evaluate_forecast(
     quantiles: list[float],
     y_naive: np.ndarray | None = None,
 ) -> dict:
-    """Compute all metrics for a quantile forecast.
+    """All metrics for a quantile forecast.
 
     ``y_pred_df`` must have a ``point_forecast`` column (or ``q_0.50``)
-    and ``q_{q:.2f}`` columns for each quantile in ``quantiles``.
+    and ``q_{q:.2f}`` columns for each quantile.
     """
     results: dict[str, float] = {}
 

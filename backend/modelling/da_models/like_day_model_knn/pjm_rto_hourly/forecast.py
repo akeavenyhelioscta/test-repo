@@ -1,31 +1,42 @@
-"""Hourly forecast aggregation for pjm_rto_hourly - per-hour analogs.
+"""Hourly forecast assembly for pjm_rto_hourly.
 
-Analogs are per-(date, hour) tuples, so this module groups by hour_ending
-and computes weighted averages within each hour's own ensemble. The
-OnPeak/OffPeak/Flat aggregate quantile bands use **per-date joint
-sampling** rather than a naive mean of per-HE quantiles: each candidate
-analog date contributes its real historical window mean to the
-aggregate distribution, weighted by its summed inverse-distance weight
-across the window's hours. This preserves within-day price comovement
-that the marginal-quantile-mean and independent-MC alternatives both
-discard (see `aggregate_quantile_bands_joint`).
+Aggregates per-(hour, analog) tuples into a 24-hour forecast, then
+overlays MC-derived joint quantile bands on the OnPeak/OffPeak/Flat
+aggregates so synthetic-day correlated tail risk is reflected.
+
+Faithful to forecast.py:605-638 (``_aggregate_quantile_bands``),
+forecast.py:94-100 (``_weighted_quantile``), and forecast.py:643-669
+(``_summarize`` / ``_build_output_table``).
 """
 
 from __future__ import annotations
 
-from datetime import date
+import logging
+from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from backend.modelling.da_models.common.configs import HOURS
-from backend.modelling.da_models.common.forecast.output import add_summary_cols
+from backend.modelling.da_models.like_day_model_knn import configs
+from backend.modelling.da_models.like_day_model_knn.calendar import (
+    FunnelCounts,
+    load_pjm_dates_daily,
+)
+from backend.modelling.da_models.like_day_model_knn.pjm_rto_hourly.builder import (
+    build_pool,
+    build_query_row,
+)
+from backend.modelling.da_models.like_day_model_knn.pjm_rto_hourly.engine import find_twins
 
-_ONPEAK_HOURS: tuple[int, ...] = tuple(range(8, 24))  # HE8..HE23
-_OFFPEAK_HOURS: tuple[int, ...] = tuple(list(range(1, 8)) + [24])  # HE1..HE7, HE24
+logger = logging.getLogger(__name__)
+
+
+HOURS: tuple[int, ...] = tuple(range(1, 25))
 
 
 def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+    """Weight-aware quantile via cumulative-weight interpolation."""
     idx = np.argsort(values)
     v = values[idx]
     w = weights[idx]
@@ -34,14 +45,19 @@ def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> floa
     return float(np.interp(q, cdf, v))
 
 
+_weighted_quantile = weighted_quantile  # backward-compat alias for internal callers
+
+
 def hourly_forecast_from_hour_analogs(
     analogs: pd.DataFrame,
     quantiles: list[float],
 ) -> pd.DataFrame:
-    """Aggregate per-(hour, rank) analog tuples into a 24-hour forecast.
+    """Per-HE point forecast + quantiles from the engine's analog table.
 
-    Expects ``analogs`` with columns: hour_ending, weight, lmp.
-    Group by hour_ending and produce a weighted point + quantiles per HE.
+    Expects ``analogs`` columns: ``hour_ending, weight, lmp``. Produces
+    one row per HE with ``point_forecast`` and ``q_{q:.2f}`` columns.
+    Weights are renormalized within each HE before averaging — matches
+    ``run_forecast`` internals and the sibling wide-pool helper.
     """
     if len(analogs) == 0 or not {"hour_ending", "weight", "lmp"}.issubset(
         analogs.columns
@@ -65,115 +81,81 @@ def hourly_forecast_from_hour_analogs(
     return pd.DataFrame(rows)
 
 
-def aggregate_quantile_bands_joint(
+def aggregate_quantile_bands_from_analogs(
     analogs: pd.DataFrame,
-    pool: pd.DataFrame,
     quantiles: list[float],
     hour_groups: dict[str, list[int]] | None = None,
+    n_draws: int = 2000,
+    seed: int = 7,
 ) -> dict[str, dict[float, float]]:
-    """Per-date joint quantile bands for OnPeak/OffPeak/Flat aggregates.
+    """MC joint quantile bands for OnPeak/OffPeak/Flat aggregates.
 
-    Preserves within-day price comovement: each candidate analog date
-    contributes its real historical window mean (from ``pool``) to the
-    aggregate distribution, weighted by its summed inverse-distance
-    weight across the window's hours. The quantile is then a weighted
-    quantile of the per-date window means — no independence assumption,
-    no marginal-quantile averaging.
-
-    Window definitions:
-      - OnPeak  : HE8..HE23
-      - OffPeak : HE1..HE7, HE24
-      - Flat    : HE1..HE24
+    Convenience wrapper around ``_aggregate_quantile_bands`` that takes
+    the analogs DataFrame directly so callers don't have to reshape.
     """
     if hour_groups is None:
         hour_groups = {
-            "OnPeak": list(_ONPEAK_HOURS),
-            "OffPeak": list(_OFFPEAK_HOURS),
+            "OnPeak": list(configs.ONPEAK_HOURS),
+            "OffPeak": list(configs.OFFPEAK_HOURS),
             "Flat": list(HOURS),
         }
-    nan_out = {label: {q: float("nan") for q in quantiles} for label in hour_groups}
-    if analogs is None or len(analogs) == 0 or pool is None or len(pool) == 0:
-        return nan_out
-
-    out: dict[str, dict[float, float]] = {}
-    for label, hours in hour_groups.items():
-        sub = analogs[analogs["hour_ending"].isin(hours)]
+    per_hour: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for h in HOURS:
+        sub = analogs[analogs["hour_ending"] == h].dropna(subset=["lmp"])
         if len(sub) == 0:
-            out[label] = {q: float("nan") for q in quantiles}
             continue
-        date_w = sub.groupby("date")["weight"].sum()
-        candidate_dates = date_w.index.tolist()
-
-        pool_sub = pool[
-            pool["date"].isin(candidate_dates) & pool["hour_ending"].isin(hours)
-        ][["date", "hour_ending", "lmp"]].dropna(subset=["lmp"])
-        if len(pool_sub) == 0:
-            out[label] = {q: float("nan") for q in quantiles}
+        vals = sub["lmp"].to_numpy(dtype=float)
+        w = sub["weight"].to_numpy(dtype=float)
+        if w.sum() <= 0:
             continue
-        profile = pool_sub.pivot(index="date", columns="hour_ending", values="lmp")
-        full = profile.dropna(how="any")
-        if len(full) == 0:
-            out[label] = {q: float("nan") for q in quantiles}
-            continue
-
-        window_means = full.mean(axis=1).to_numpy(dtype=float)
-        weights = date_w.loc[full.index].to_numpy(dtype=float)
-        if weights.sum() <= 0:
-            out[label] = {q: float("nan") for q in quantiles}
-            continue
-        weights = weights / weights.sum()
-        out[label] = {q: weighted_quantile(window_means, weights, q) for q in quantiles}
-    return out
+        w = w / w.sum()
+        per_hour[h] = (vals, w)
+    return _aggregate_quantile_bands(per_hour, hour_groups, quantiles, n_draws, seed)
 
 
 def build_quantiles_table(
     target_date: date,
     df_forecast: pd.DataFrame,
-    display_quantiles: list[float] = (0.25, 0.375, 0.50, 0.625, 0.75),
+    display_quantiles: list[float] | tuple[float, ...] = (
+        0.25,
+        0.375,
+        0.50,
+        0.625,
+        0.75,
+    ),
     analogs: pd.DataFrame | None = None,
-    pool: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Pivot quantile bands into the same wide shape as build_output_table.
+    """Wide quantile-bands table — P-rows + Forecast row inserted between P50 and the next-higher band.
 
-    Rows: P{q*100} bands in ascending order with the point Forecast row
-    inserted between P50 and the next-higher quantile (matches the
-    reference ``_print_quantiles`` layout).
-
-    When both ``analogs`` and ``pool`` are provided, the OnPeak/OffPeak/
-    Flat summary cells of the P-rows are overridden with per-date joint
-    quantiles (``aggregate_quantile_bands_joint``). The Forecast row's
-    summary cells stay as the simple mean of HE point forecasts (which
-    is identical to a per-date weighted mean by linearity).
+    Mirrors the sibling wide-pool ``build_quantiles_table`` shape so the
+    terminal report is visually identical. When ``analogs`` is provided,
+    OnPeak/OffPeak/Flat summary cells are overridden by the MC joint
+    bands (Sunny's algorithmic improvement); otherwise the naive
+    per-hour-quantile mean is used.
     """
+    cols = ["Date", "Type"] + [f"HE{h}" for h in HOURS] + ["OnPeak", "OffPeak", "Flat"]
     if len(df_forecast) == 0:
-        cols = (
-            ["Date", "Type"]
-            + [f"HE{h}" for h in range(1, 25)]
-            + ["OnPeak", "OffPeak", "Flat"]
-        )
         return pd.DataFrame(columns=cols)
 
-    # P-rows
     rows: list[dict] = []
     for q in sorted(display_quantiles):
         col = f"q_{q:.2f}"
         if col not in df_forecast.columns:
             continue
         label = _quantile_label(q)
-        row = {"Date": target_date, "Type": label}
+        row: dict = {"Date": target_date, "Type": label}
         for _, r in df_forecast.iterrows():
             row[f"HE{int(r['hour_ending'])}"] = (
                 float(r[col]) if pd.notna(r[col]) else None
             )
-        rows.append(add_summary_cols(row))
+        rows.append(_summarize(row))
 
-    # Insert Forecast row between P50 and the next-higher band.
-    forecast_row = {"Date": target_date, "Type": "Forecast"}
+    forecast_row: dict = {"Date": target_date, "Type": "Forecast"}
     for _, r in df_forecast.iterrows():
         forecast_row[f"HE{int(r['hour_ending'])}"] = (
             float(r["point_forecast"]) if pd.notna(r.get("point_forecast")) else None
         )
-    forecast_row = add_summary_cols(forecast_row)
+    forecast_row = _summarize(forecast_row)
 
     insert_at = next(
         (i for i, row in enumerate(rows) if row["Type"] == "P50"),
@@ -181,10 +163,8 @@ def build_quantiles_table(
     )
     rows.insert(insert_at + 1, forecast_row)
 
-    if analogs is not None and pool is not None and len(analogs) > 0:
-        joint = aggregate_quantile_bands_joint(
-            analogs, pool, list(sorted(display_quantiles))
-        )
+    if analogs is not None and len(analogs) > 0:
+        bands = aggregate_quantile_bands_from_analogs(analogs, list(display_quantiles))
         for row in rows:
             if row["Type"] == "Forecast":
                 continue
@@ -193,20 +173,254 @@ def build_quantiles_table(
             except (TypeError, ValueError):
                 continue
             for label in ("OnPeak", "OffPeak", "Flat"):
-                v = joint.get(label, {}).get(q_for_row)
+                v = bands.get(label, {}).get(q_for_row)
                 if v is not None:
                     row[label] = v
 
-    cols = (
-        ["Date", "Type"]
-        + [f"HE{h}" for h in range(1, 25)]
-        + ["OnPeak", "OffPeak", "Flat"]
-    )
     return pd.DataFrame(rows, columns=cols)
 
 
+def _summarize(row: dict) -> dict:
+    on = [row.get(f"HE{h}") for h in configs.ONPEAK_HOURS]
+    off = [row.get(f"HE{h}") for h in configs.OFFPEAK_HOURS]
+    flat = [row.get(f"HE{h}") for h in HOURS]
+    on = [v for v in on if v is not None and not pd.isna(v)]
+    off = [v for v in off if v is not None and not pd.isna(v)]
+    flat = [v for v in flat if v is not None and not pd.isna(v)]
+    row["OnPeak"] = float(np.mean(on)) if on else float("nan")
+    row["OffPeak"] = float(np.mean(off)) if off else float("nan")
+    row["Flat"] = float(np.mean(flat)) if flat else float("nan")
+    return row
+
+
+def _build_output_table(
+    target_date: date,
+    forecast_hourly: dict[int, float],
+    actual_hourly: dict[int, float] | None,
+) -> pd.DataFrame:
+    rows: list[dict] = []
+    if actual_hourly:
+        rows.append(
+            _summarize(
+                {
+                    "Date": target_date,
+                    "Type": "Actual",
+                    **{f"HE{h}": actual_hourly.get(h) for h in HOURS},
+                }
+            )
+        )
+    rows.append(
+        _summarize(
+            {
+                "Date": target_date,
+                "Type": "Forecast",
+                **{f"HE{h}": forecast_hourly.get(h) for h in HOURS},
+            }
+        )
+    )
+    if actual_hourly:
+        err: dict = {}
+        for h in HOURS:
+            f = forecast_hourly.get(h)
+            a = actual_hourly.get(h)
+            err[f"HE{h}"] = (
+                (f - a)
+                if (
+                    f is not None
+                    and a is not None
+                    and not pd.isna(f)
+                    and not pd.isna(a)
+                )
+                else None
+            )
+        rows.append(_summarize({"Date": target_date, "Type": "Error", **err}))
+    cols = ["Date", "Type"] + [f"HE{h}" for h in HOURS] + ["OnPeak", "OffPeak", "Flat"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _aggregate_quantile_bands(
+    per_hour: dict[int, tuple[np.ndarray, np.ndarray]],
+    hour_groups: dict[str, list[int]],
+    quantiles: list[float],
+    n_draws: int = 2000,
+    seed: int = 7,
+) -> dict[str, dict[float, float]]:
+    rng = np.random.default_rng(seed)
+    out: dict[str, dict[float, float]] = {}
+    for label, hours in hour_groups.items():
+        usable = [h for h in hours if h in per_hour and len(per_hour[h][0]) > 0]
+        if not usable:
+            out[label] = {q: float("nan") for q in quantiles}
+            continue
+        draws = np.zeros((n_draws, len(usable)), dtype=float)
+        for j, h in enumerate(usable):
+            vals, ws = per_hour[h]
+            ws = ws / ws.sum()
+            idx = rng.choice(len(vals), size=n_draws, p=ws)
+            draws[:, j] = vals[idx]
+        agg = draws.mean(axis=1)
+        agg.sort()
+        out[label] = {q: float(np.quantile(agg, q)) for q in quantiles}
+    return out
+
+
 def _quantile_label(q: float) -> str:
-    q_pct = q * 100
-    if float(q_pct).is_integer():
-        return f"P{int(q_pct):02d}"
-    return f"P{q_pct:.1f}".rstrip("0").rstrip(".")
+    pct = q * 100.0
+    if float(pct).is_integer():
+        return f"P{int(pct):02d}"
+    return f"P{pct:.1f}".rstrip("0").rstrip(".")
+
+
+def _actuals_long(pool: pd.DataFrame, target_date: date) -> dict[int, float] | None:
+    sub = pool[pool["date"] == target_date]
+    if len(sub) == 0:
+        return None
+    out: dict[int, float] = {}
+    for _, r in sub.iterrows():
+        v = r.get("lmp")
+        if pd.notna(v):
+            out[int(r["hour_ending"])] = float(v)
+    if len(out) < 12:
+        return None
+    return out
+
+
+def run_forecast(
+    target_date: date | None = None,
+    config: configs.KnnModelConfig | None = None,
+    cache_dir: Path | None = None,
+    pool: pd.DataFrame | None = None,
+    feature_group_weights_override: dict[str, float] | None = None,
+) -> dict:
+    cfg = config or configs.KnnModelConfig()
+    if target_date is None:
+        target_date = cfg.resolved_target_date()
+    target_date = pd.to_datetime(target_date).date()
+    cache_dir = cache_dir or configs.CACHE_DIR
+
+    cfg, day_type = cfg.with_day_type_overrides(target_date)
+    spec = cfg.resolved_spec()
+    quantiles = cfg.resolved_quantiles()
+
+    if pool is None:
+        pool = build_pool(
+            hub=cfg.hub,
+            label_source=cfg.label_source,
+            cache_dir=cache_dir,
+            spec=spec,
+        )
+    query = build_query_row(target_date=target_date, cache_dir=cache_dir, spec=spec)
+    dates_meta = load_pjm_dates_daily(cache_dir=cache_dir)
+
+    from backend.modelling.da_models.like_day_model_knn.pjm_rto_hourly.engine import (
+        _effective_weights,
+    )
+
+    weights = _effective_weights(spec, feature_group_weights_override)
+
+    funnel = FunnelCounts()
+    analogs = find_twins(
+        query=query,
+        pool=pool,
+        target_date=target_date,
+        spec=spec,
+        n_analogs=cfg.n_analogs,
+        season_window_days=cfg.season_window_days,
+        min_pool_size=cfg.min_pool_size,
+        dates_meta=dates_meta,
+        same_dow_group=cfg.same_dow_group,
+        same_weekend_group=cfg.same_weekend_group,
+        same_weekend_group_for_weekends=cfg.same_weekend_group_for_weekends,
+        exclude_holidays=cfg.exclude_holidays,
+        exclude_dates=cfg.exclude_dates,
+        recency_half_life_days=cfg.recency_half_life_days,
+        feature_group_weights_override=feature_group_weights_override,
+        funnel=funnel,
+    )
+
+    forecast_hourly: dict[int, float] = {}
+    quantiles_hourly: dict[int, dict[float, float]] = {}
+    per_hour_dist: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    n_used: list[int] = []
+
+    for h in HOURS:
+        sub = analogs[analogs["hour_ending"] == h].dropna(subset=["lmp"])
+        if len(sub) == 0:
+            continue
+        vals = sub["lmp"].to_numpy(dtype=float)
+        ws = sub["weight"].to_numpy(dtype=float)
+        if ws.sum() <= 0:
+            continue
+        ws = ws / ws.sum()
+        forecast_hourly[h] = float(np.average(vals, weights=ws))
+        quantiles_hourly[h] = {q: _weighted_quantile(vals, ws, q) for q in quantiles}
+        per_hour_dist[h] = (vals, ws)
+        n_used.append(len(sub))
+
+    actual_hourly = _actuals_long(pool, target_date)
+    output_table = _build_output_table(target_date, forecast_hourly, actual_hourly)
+
+    hour_groups = {
+        "OnPeak": list(configs.ONPEAK_HOURS),
+        "OffPeak": list(configs.OFFPEAK_HOURS),
+        "Flat": list(HOURS),
+    }
+    aggregate_bands = _aggregate_quantile_bands(per_hour_dist, hour_groups, quantiles)
+
+    q_rows: list[dict] = []
+    cols_template = (
+        ["Date", "Type"] + [f"HE{h}" for h in HOURS] + ["OnPeak", "OffPeak", "Flat"]
+    )
+    for q in quantiles:
+        row: dict = {"Date": target_date, "Type": _quantile_label(q)}
+        for h in HOURS:
+            row[f"HE{h}"] = quantiles_hourly.get(h, {}).get(q)
+        row = _summarize(row)
+        for label in ("OnPeak", "OffPeak", "Flat"):
+            row[label] = aggregate_bands.get(label, {}).get(q, row.get(label))
+        q_rows.append(row)
+    quantiles_table = pd.DataFrame(q_rows, columns=cols_template)
+
+    target_features: dict[int, dict[str, float | None]] = {}
+    feature_cols_for_target = [
+        "load_mw_at_hour",
+        "temp_at_hour",
+        "solar_at_hour",
+        "wind_at_hour",
+        "gas_m3_daily_avg",
+        "outage_total_mw",
+        "load_ramp_1h_at_hour",
+        "load_ramp_3h_at_hour",
+        "net_load_at_hour",
+    ]
+    for h in HOURS:
+        q_rows_for_h = query[query["hour_ending"] == h]
+        if len(q_rows_for_h) == 0:
+            continue
+        q_row = q_rows_for_h.iloc[0]
+        target_features[h] = {
+            c: (float(q_row[c]) if c in q_row.index and pd.notna(q_row[c]) else None)
+            for c in feature_cols_for_target
+        }
+
+    logger.info(
+        "Hourly KNN forecast: target=%s hours=%d avg_analogs=%.1f has_actuals=%s",
+        target_date,
+        len(forecast_hourly),
+        float(np.mean(n_used)) if n_used else 0.0,
+        actual_hourly is not None,
+    )
+
+    return {
+        "output_table": output_table,
+        "quantiles_table": quantiles_table,
+        "analogs": analogs,
+        "target_features_by_hour": target_features,
+        "forecast_date": str(target_date),
+        "reference_date": str(target_date - timedelta(days=1)),
+        "has_actuals": actual_hourly is not None,
+        "n_analogs_used": int(np.mean(n_used)) if n_used else 0,
+        "scenario": "hourly_knn",
+        "feature_weights": weights,
+        "day_type": day_type,
+    }

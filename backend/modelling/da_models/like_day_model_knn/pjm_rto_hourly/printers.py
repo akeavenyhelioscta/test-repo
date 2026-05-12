@@ -1,15 +1,13 @@
-"""Terminal printers for the pjm_rto_hourly forecast.
+"""Terminal printers for pjm_rto_hourly forecast.
 
-Mirrors the ``_print_*`` helpers in
-helioscta-pjm-da/backend/src/like_day_forecast/pipelines/forecast.py so a
-side-by-side run produces visually-comparable terminal output.
+Mirrors like_day_model_knn/pjm_rto_hourly/printers.py so a side-by-side
+run produces visually-comparable terminal output. Adapted for the
+long-format scalar pool: daily features come from groupby(date) reducers
+on the long frame, per-feature sub-strips use scalar z-distance per HE
+rather than the windowed RMS-z the wide engine uses.
 
-Adapted to the per-hour KNN engine's output shape: analogs are emitted
-per (hour_ending, rank) pair, so the analogs table aggregates per-date
-(n_hours appeared, mean distance, summed weight). The richer
-``print_analog_features`` view (daily features + per-HE z-strips) is
-ported from the sibling like_day_model_knn_sunny printer to keep the
-two terminal reports visually identical.
+Cross-family imports are forward-only: we import from common/ and utils/
+only — never from backend.modelling.da_models.like_day_model_knn.
 """
 
 from __future__ import annotations
@@ -18,7 +16,6 @@ from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
-from tabulate import tabulate
 
 from backend.modelling.da_models.like_day_model_knn.configs import KnnModelConfig, ModelSpec
 from backend.utils.logging_utils import (
@@ -30,33 +27,16 @@ from backend.utils.logging_utils import (
 )
 
 _COLOR_ON = supports_color()
-# 256-color escapes for shades the base palette doesn't expose:
-#   166 = dark orange,  93 = medium purple (distinct from MAGENTA's pink-purple)
-#   22/28 = dark green / green; 88/124 = dark red / red (gradient buckets)
-_DARK_ORANGE_256 = "\033[38;5;166m"
-_PURPLE_256 = "\033[38;5;93m"
-_DARK_GREEN_256 = "\033[38;5;22m"
-_GREEN_256 = "\033[38;5;28m"
-_RED_256 = "\033[38;5;124m"
-_DARK_RED_256 = "\033[38;5;88m"
-
-_HL_FORECAST = (Colors.BOLD + Colors.BRIGHT_BLUE) if _COLOR_ON else ""
-_HL_ACTUAL = (Colors.BOLD + _PURPLE_256) if _COLOR_ON else ""
-_HL_QUARTILE = (Colors.BOLD + Colors.YELLOW) if _COLOR_ON else ""
-_HL_OUTER_QUANTILE = (Colors.BOLD + _DARK_ORANGE_256) if _COLOR_ON else ""
+_HL_FORECAST = (Colors.BOLD + Colors.BRIGHT_RED) if _COLOR_ON else ""
+_HL_QUARTILE = Colors.CYAN if _COLOR_ON else ""
 _HL_INNER = Colors.YELLOW if _COLOR_ON else ""
 _HL_UP = Colors.BRIGHT_GREEN if _COLOR_ON else ""
 _HL_DOWN = Colors.BRIGHT_RED if _COLOR_ON else ""
-_HL_SECTION = Colors.BOLD if _COLOR_ON else ""
-_HL_NOTE = Colors.DIM if _COLOR_ON else ""
 _RS = Colors.RESET if _COLOR_ON else ""
 _ROW_STYLES: dict[str, str] = {
     "Forecast": _HL_FORECAST,
-    "Actual": _HL_ACTUAL,
-    "P10": _HL_OUTER_QUANTILE,
     "P25": _HL_QUARTILE,
     "P75": _HL_QUARTILE,
-    "P90": _HL_OUTER_QUANTILE,
     "P37.5": _HL_INNER,
     "P62.5": _HL_INNER,
 }
@@ -74,24 +54,22 @@ DAY_ABBR: dict[int, str] = {
 _FEATURE_KEYS: tuple[str, ...] = (
     "da_onpk",
     "load",
-    "load_ramp",
+    "temp",
     "solar",
     "wind",
-    "net_load",
-    "temp",
     "outages",
     "m3",
 )
-# numeric feature keys handled by the standard sigma-gap path. "cal" is
-# rendered as a text-only DOW column and bypasses _FEATURE_KEYS entirely.
 
 
 def quantile_label(q: float) -> str:
-    """Format quantile label (P25, P37.5, P90, ...)."""
     q_pct = q * 100
     if float(q_pct).is_integer():
         return f"P{int(q_pct):02d}"
     return f"P{q_pct:.1f}".rstrip("0").rstrip(".")
+
+
+# ── 1) print_config ────────────────────────────────────────────────────
 
 
 def print_config(
@@ -99,10 +77,21 @@ def print_config(
     spec: ModelSpec,
     target_date: date,
     day_type: str,
+    effective_weights: dict[str, float] | None = None,
 ) -> None:
-    """Forecast configuration block (90-char banner)."""
+    """Forecast configuration block (90-char banner).
+
+    ``effective_weights`` (when given) replaces the spec's renormalized
+    weights for the ``norm`` column — used when a caller passes
+    ``feature_group_weights_override`` to ``run_forecast`` so the
+    printed weights match what the engine actually used.
+    """
     target_dow = DAY_ABBR[target_date.weekday()]
-    weights = spec.feature_group_weights
+    weights = (
+        effective_weights
+        if effective_weights is not None
+        else spec.feature_group_weights
+    )
 
     window = config.season_window_days
     win_start = target_date - timedelta(days=window)
@@ -116,29 +105,26 @@ def print_config(
     print(f"  Spec          {spec.name}")
     print(f"  Description   {spec.description}")
 
-    half_life_days = float(getattr(config, "recency_half_life_days", 0.0) or 0.0)
-    if half_life_days > 0:
-        weight_method = (
-            "inverse_distance (analog weights) + linear pre-selection age "
-            f"penalty (half-life={half_life_days:g} days)"
-        )
+    half_life = config.recency_half_life_days
+    if half_life is not None and float(half_life) > 0:
+        weight_method = f"inverse_distance_sq * linear_age_penalty (half-life={float(half_life):g}d)"
     else:
-        weight_method = "inverse_distance"
+        weight_method = "inverse_distance_sq"
 
     print_section("Analog Selection")
     print(f"  N analogs          {config.n_analogs}")
     print(f"  Weight method      {weight_method}")
-    print(f"  flt_radius         {spec.flt_radius}")
+    print(f"  Label source       {config.label_source}")
 
     print_section("Pre-Filtering")
     print(
         f"  Season window      +/-{window}d  "
         f"({win_start.strftime('%b %d')} - {win_end.strftime('%b %d')})"
     )
-    print(f"  DOW group filter   {config.same_dow_group}")
+    print(f"  Same DOW group     {config.same_dow_group}  (exact day-of-week match)")
     print(
-        f"  Weekend filter     same_weekend_group={config.same_weekend_group}  "
-        f"for_weekends={config.same_weekend_group_for_weekends}"
+        f"  Same weekend grp   {config.same_weekend_group}  "
+        f"(weekends_only={config.same_weekend_group_for_weekends})"
     )
     print(f"  Exclude holidays   {config.exclude_holidays}")
     if config.exclude_dates:
@@ -147,16 +133,20 @@ def print_config(
 
     print_section("Recency")
     print(f"  Max age years      {config.max_age_years}")
-    print(f"  Half-life days     {half_life_days:g}")
-    print(f"  Label source       {getattr(config, 'label_source', 'hub_lmp')}")
+    print(f"  Half-life days     {config.recency_half_life_days}")
 
-    from backend.modelling.da_models.like_day_model_knn import configs as _configs_module
-    from backend.modelling.da_models.like_day_model_knn.domains import feature_group_weight_locations
+    from backend.modelling.da_models.like_day_model_knn import (
+        configs as _configs_module,
+    )
+    from backend.modelling.da_models.like_day_model_knn.domains import (
+        feature_group_weight_locations,
+    )
 
     raw_weights = spec.raw_feature_group_weights
     active = {k: v for k, v in sorted(weights.items()) if v > 0}
     disabled = [k for k, v in sorted(weights.items()) if v == 0]
-    raw_total = sum(raw_weights.get(k, 0.0) for k in active)
+    raw_for_print = {k: raw_weights.get(k, 0.0) for k in active}
+    raw_total = sum(raw_for_print.values())
     locations = feature_group_weight_locations()
 
     print_section("Feature Group Weights")
@@ -172,8 +162,8 @@ def print_config(
     )
     for name, w in sorted(active.items(), key=lambda x: -x[1]):
         bar = "#" * int(w * 40)
-        raw = raw_weights.get(name, 0.0)
-        loc_str = loc_strs.get(name, "—")
+        raw = raw_for_print.get(name, 0.0)
+        loc_str = loc_strs.get(name, "-")
         print(f"  {name:<32} {raw:>6.3f} {w:>6.3f}  {bar:<{bar_w}}  {loc_str:<{loc_w}}")
     print(f"  {'(sum)':<32} {raw_total:>6.3f} {1.0:>6.3f}")
 
@@ -185,68 +175,108 @@ def print_config(
     print_divider("=", 90, dim=False)
 
 
-def print_pool_funnel(
-    funnel,
+# ── 2) print_pool_summary  (replaces print_pool_funnel for long-pool engine) ──
+
+
+def print_pool_summary(
+    pool: pd.DataFrame,
+    analogs: pd.DataFrame,
+    config: KnnModelConfig,
     target_date: date,
     day_type: str,
-    hub: str,
 ) -> None:
-    """Render the candidate-pool funnel before distance computation."""
+    """Pool-summary block — global filters + analog ladder breakdown.
+
+    Sunny's filter ladder fires per-HE so there's no single funnel; this
+    block reports the global filters that DO fire once (chronological
+    cut, season window, max_age) plus a count of which ladder stages
+    actually selected the per-HE pools.
+    """
     target_dow = DAY_ABBR[target_date.weekday()]
-    print_header("POOL FUNNEL", "=", 110)
+    print_header("POOL SUMMARY", "=", 110)
     print(
         f"  Forecast: {target_date} ({target_dow})  |  Day-type: {day_type}  "
-        f"|  Hub: {hub}"
+        f"|  Hub: {config.hub}"
     )
     print_divider("=", 110, dim=False)
 
-    if funnel is None or not funnel.stages:
-        print("\n  (no funnel records)")
-        return
+    raw_dates = int(pool["date"].nunique()) if len(pool) else 0
+    pre_target = pool[pool["date"] < target_date] if len(pool) else pool
+    pre_target_dates = int(pre_target["date"].nunique()) if len(pre_target) else 0
 
-    raw = funnel.initial
-    final = funnel.final
+    season = config.season_window_days
+    if season > 0 and pre_target_dates > 0:
+        target_doy = pd.Timestamp(target_date).dayofyear
+        doy = pd.to_datetime(pre_target["date"]).dt.dayofyear.to_numpy(dtype=float)
+        direct = np.abs(doy - float(target_doy))
+        circ = np.minimum(direct, 366.0 - direct)
+        season_mask = circ <= float(season)
+        season_dates = int(pre_target.loc[season_mask, "date"].nunique())
+    else:
+        season_dates = pre_target_dates
+
+    if config.max_age_years is not None and config.max_age_years > 0:
+        cutoff = pd.Timestamp(target_date) - pd.DateOffset(
+            years=int(config.max_age_years)
+        )
+        max_age_dates = int(
+            pre_target[pd.to_datetime(pre_target["date"]) >= cutoff]["date"].nunique()
+        )
+    else:
+        max_age_dates = pre_target_dates
+
+    n_analog_dates = int(analogs["date"].nunique()) if len(analogs) else 0
+    n_analog_rows = len(analogs) if analogs is not None else 0
 
     print()
-    print(
-        f"  {'Stage':<5}  {'Filter':<24}  {'Detail':<46}  "
-        f"{'Survives':>9}  {'Dropped':>9}  {'Cumul %':>8}"
-    )
-    print("  " + "─" * 108)
-    for i, st in enumerate(funnel.stages):
-        cum_pct = (st.survives / raw * 100.0) if raw > 0 else 0.0
-        if st.relaxed:
-            wd = st.would_survive if st.would_survive is not None else 0
-            survives_str = (
-                f"{_HL_DOWN}{st.survives:>9,}{_RS}"
-                if _COLOR_ON
-                else f"{st.survives:>9,}"
+    print(f"  {'Stage':<5}  {'Filter':<30}  {'Detail':<46}  {'Survives':>9}")
+    print("  " + "-" * 100)
+    rows = [
+        ("0", "raw history", f"build_pool: {len(pool):,} rows", f"{raw_dates:,}"),
+        (
+            "1",
+            "chronological cut",
+            f"date < target ({target_date})",
+            f"{pre_target_dates:,}",
+        ),
+        (
+            "2",
+            "season window",
+            f"+/-{season}d (DOY circular)",
+            f"{season_dates:,}",
+        ),
+    ]
+    if config.max_age_years is not None and config.max_age_years > 0:
+        rows.append(
+            (
+                "3",
+                "recency cap",
+                f"max_age={config.max_age_years}y",
+                f"{max_age_dates:,}",
             )
-            dropped_str = f"{'(relaxed)':>9}"
-            detail_str = f"{st.detail}  → would yield {wd:,} (< min, kept full)"
-        else:
-            survives_str = f"{st.survives:>9,}"
-            dropped_str = f"{-st.dropped:>+9,}" if st.dropped > 0 else f"{0:>9}"
-            detail_str = st.detail
-        print(
-            f"  {i:<5}  {st.name:<24}  {detail_str[:46]:<46}  "
-            f"{survives_str}  {dropped_str}  {cum_pct:>7.1f}%"
         )
-    print("  " + "─" * 108)
+    for idx, name, detail, survives in rows:
+        print(f"  {idx:<5}  {name:<30}  {detail[:46]:<46}  {survives:>9}")
+    print("  " + "-" * 100)
 
-    overall_drop = raw - final
-    overall_pct = (final / raw * 100.0) if raw > 0 else 0.0
     final_color = f"{Colors.BOLD}{Colors.BRIGHT_GREEN}" if _COLOR_ON else ""
     print(
-        f"  → {final_color}{final:,}{_RS} candidates feed find_twins  "
-        f"|  {overall_drop:,} dropped overall ({overall_pct:.1f}% retained)"
+        f"  -> per-HE ladder selected {final_color}{n_analog_dates}{_RS} "
+        f"unique analog date(s) across {n_analog_rows} (HE x rank) rows"
     )
+
+    if len(analogs) > 0:
+        per_hour = analogs.groupby("hour_ending")["date"].nunique()
+        print(
+            f"  -> per HE: min={int(per_hour.min())} median={int(per_hour.median())} "
+            f"max={int(per_hour.max())} unique dates"
+        )
 
     print()
     print_divider("=", 110, dim=False)
 
 
-# ── analog-features helpers (ported from like_day_model_knn_sunny) ────────
+# ── 3) print_analog_features ──────────────────────────────────────────
 
 
 def _daily_features_long(pool: pd.DataFrame) -> pd.DataFrame:
@@ -266,9 +296,6 @@ def _daily_features_long(pool: pd.DataFrame) -> pd.DataFrame:
             "load": grouped["load_mw_at_hour"].max()
             if "load_mw_at_hour" in pool.columns
             else np.nan,
-            "load_ramp": grouped["load_ramp_3h_at_hour"].max()
-            if "load_ramp_3h_at_hour" in pool.columns
-            else np.nan,
             "temp": grouped["temp_at_hour"].mean()
             if "temp_at_hour" in pool.columns
             else np.nan,
@@ -278,14 +305,11 @@ def _daily_features_long(pool: pd.DataFrame) -> pd.DataFrame:
             "wind": grouped["wind_at_hour"].max()
             if "wind_at_hour" in pool.columns
             else np.nan,
-            "net_load": grouped["net_load_at_hour"].max()
-            if "net_load_at_hour" in pool.columns
-            else np.nan,
             "outages": grouped["outage_total_mw"].first()
             if "outage_total_mw" in pool.columns
             else np.nan,
-            "m3": grouped["gas_m3_avg"].first()
-            if "gas_m3_avg" in pool.columns
+            "m3": grouped["gas_m3_daily_avg"].first()
+            if "gas_m3_daily_avg" in pool.columns
             else np.nan,
         }
     )
@@ -300,7 +324,8 @@ def _daily_features_from_query(query: pd.DataFrame) -> dict[str, float | None]:
     def _max(col: str) -> float | None:
         if col not in query.columns:
             return None
-        v = query[col].astype(float).dropna()
+        v = query[col].astype(float)
+        v = v.dropna()
         return float(v.max()) if len(v) else None
 
     def _mean(col: str) -> float | None:
@@ -316,15 +341,13 @@ def _daily_features_from_query(query: pd.DataFrame) -> dict[str, float | None]:
         return float(v.iloc[0]) if len(v) else None
 
     return {
-        "da_onpk": None,
+        "da_onpk": None,  # query has no LMP — target's DA OnPk is unknown
         "load": _max("load_mw_at_hour"),
-        "load_ramp": _max("load_ramp_3h_at_hour"),
         "temp": _mean("temp_at_hour"),
         "solar": _max("solar_at_hour"),
         "wind": _max("wind_at_hour"),
-        "net_load": _max("net_load_at_hour"),
         "outages": _scalar("outage_total_mw"),
-        "m3": _scalar("gas_m3_avg"),
+        "m3": _scalar("gas_m3_daily_avg"),
     }
 
 
@@ -345,7 +368,12 @@ def _scalar_feature_he_z(
     query: pd.DataFrame,
     feature_col: str,
 ) -> dict[date, list[float | None]]:
-    """Per-HE z-distance for one scalar feature."""
+    """Per-HE z-distance for one scalar feature.
+
+    For each HE h, fit pool z-stats on the long-pool slice
+    ``pool[hour_ending == h]``, then return the z-distance of every
+    pool date's value at HE h vs the target query's value at HE h.
+    """
     if (
         feature_col not in pool.columns
         or feature_col not in query.columns
@@ -450,9 +478,11 @@ def print_analog_features(
 ) -> None:
     """Combined daily-features + engine-view table for the active config.
 
-    Long-format pool: daily features are groupby(date) reducers (peak
-    load/solar/wind, scalar outages/m3, mean LMP HE8-23). Per-feature
-    sub-strips use scalar z per HE.
+    Adapted for long-format pool: daily features are groupby(date)
+    reducers (peak load/solar/wind, scalar outages/m3, mean LMP HE8-23).
+    Per-HE rank strip works as-is from the analogs DataFrame. Per-feature
+    sub-strips use scalar z per HE rather than the windowed RMS-z the
+    wide engine produces — visually equivalent.
     """
     target_dow = DAY_ABBR[target_date.weekday()]
     print_header("LIKE-DAY ANALOGS - Daily Features + Engine View", "=", 230)
@@ -501,6 +531,7 @@ def print_analog_features(
         feats["w"] = float(r["w"])
         rows_features.append(feats)
 
+    # Weighted Like-Day Avg over ALL analog dates.
     avg: dict[str, float | None] = {}
     for k in _FEATURE_KEYS:
         wsum = 0.0
@@ -518,33 +549,19 @@ def print_analog_features(
 
     stds = _pool_feature_stds_long(pool)
 
-    # Column order tracks the engine spec's feature_groups. Renewables stay
-    # split (Solar, Wind) because the grouped "renewable_level" weight is
-    # shared across two pool cols. DOW (calendar_level) is rendered as a
-    # prefix column right after Δd, not in _COLS.
     _COLS = (
         ("da_onpk", "DA OnPk", "($/MWh)", 8, 8, 2, False),
         ("load", "Load", "(MW)", 9, 9, 0, True),
-        ("load_ramp", "Ramp3h", "(MW)", 7, 7, 0, True),
+        ("temp", "Temp", "(F)", 7, 7, 1, False),
         ("solar", "Solar", "(MW)", 9, 9, 0, True),
         ("wind", "Wind", "(MW)", 9, 9, 0, True),
-        ("net_load", "NetLoad", "(MW)", 9, 9, 0, True),
-        ("temp", "Temp", "(F)", 7, 7, 1, False),
         ("outages", "Outages", "(MW)", 9, 9, 0, True),
         ("m3", "M3", "($)", 6, 7, 2, False),
     )
     SIGMA_W = 6
-    target_cal_dow = DAY_ABBR[target_date.weekday()]
-    for r in rows_features:
-        d = r["date"]
-        wd = d.weekday() if hasattr(d, "weekday") else pd.Timestamp(d).weekday()
-        r["cal"] = DAY_ABBR[wd]
 
-    _PREFIX = (
-        f"  {'rank':>4} {'Like Date':<22} {'Δd':>5} {'DOW':>4} "
-        f"{'mean_d':>7} {'sum_w':>7} {'w':>6}"
-    )
-    _PREFIX_UNITS = f"  {'':>4} {'':<22} {'':>5} {'':>4} {'':>7} {'':>7} {'':>6}"
+    _PREFIX = f"  {'rank':>4} {'Like Date':<22} {'mean_d':>7} {'sum_w':>7} {'w':>6}"
+    _PREFIX_UNITS = f"  {'':>4} {'':<22} {'':>7} {'':>7} {'':>6}"
     head_parts = [_PREFIX]
     unit_parts = [_PREFIX_UNITS]
     for _, label, units, vw, dw, _, _ in _COLS:
@@ -562,16 +579,6 @@ def print_analog_features(
     print(units_row)
     print(sep)
 
-    _DAYS_STYLE = (Colors.BOLD + Colors.BRIGHT_RED) if _COLOR_ON else ""
-
-    def _fmt_dow(dow_str: str) -> str:
-        padded = f"{dow_str:>4}"
-        if dow_str == "-" or not dow_str:
-            return padded
-        if dow_str == target_cal_dow:
-            return f"{_HL_UP}{padded}{_RS}"
-        return f"{_HL_DOWN}{padded}{_RS}"
-
     def _fmt_row(
         rank_str: str,
         label: str,
@@ -581,16 +588,9 @@ def print_analog_features(
         f: dict,
         target: dict | None,
         n_hours_str: str,
-        days_str: str = "-",
-        dow_str: str = "-",
     ) -> str:
-        days_padded = f"{days_str:>5}"
-        days_colored = (
-            f"{_DAYS_STYLE}{days_padded}{_RS}" if days_str != "-" else days_padded
-        )
         parts = [
-            f"  {rank_str:>4} {label:<22} {days_colored} {_fmt_dow(dow_str)} "
-            f"{mean_d_str:>7} {sum_w_str:>7} {w_str:>6}"
+            f"  {rank_str:>4} {label:<22} {mean_d_str:>7} {sum_w_str:>7} {w_str:>6}"
         ]
         for key, _, _, vw, dw, decimals, comma in _COLS:
             val_str = _fmt_num(f[key], vw, decimals, comma=comma)
@@ -609,21 +609,12 @@ def print_analog_features(
         parts.append(f"{n_hours_str:>4}")
         return "  ".join(parts)
 
-    _SUB_PREFIXES: tuple[str, ...] = (
-        "load",
-        "load_ramp",
-        "temp",
-        "solar",
-        "wind",
-        "net_load",
-    )
+    _SUB_PREFIXES: tuple[str, ...] = ("load", "temp", "solar", "wind")
     _SUB_TO_COL = {
         "load": "load_mw_at_hour",
-        "load_ramp": "load_ramp_3h_at_hour",
         "temp": "temp_at_hour",
         "solar": "solar_at_hour",
         "wind": "wind_at_hour",
-        "net_load": "net_load_at_hour",
     }
     sub_z_by_feat: dict[str, dict] = {
         prefix: _scalar_feature_he_z(pool, query, _SUB_TO_COL[prefix])
@@ -656,30 +647,13 @@ def print_analog_features(
             parts.append(f"{content:^{cell_w}}")
         print("  ".join(parts))
 
-    print(
-        _fmt_row(
-            "-",
-            "TARGET",
-            "-",
-            "-",
-            "-",
-            target_feats,
-            None,
-            "-",
-            "0d",
-            target_cal_dow,
-        )
-    )
+    print(_fmt_row("-", "TARGET", "-", "-", "-", target_feats, None, "-"))
     print(sep)
     n_displayed = min(n_show, len(rows_features))
     for i, r in enumerate(rows_features[:n_show]):
         d_str = pd.Timestamp(r["date"]).strftime("%a %b-%d %Y")
         date_an = analogs[analogs["date"] == r["date"]]
         _, n_hours = _he_strip_for_date(date_an)
-        d = r["date"]
-        analog_dt = d if hasattr(d, "toordinal") else pd.Timestamp(d).date()
-        days_diff = (target_date - analog_dt).days
-        days_str = f"{days_diff}d"
         print(
             _fmt_row(
                 str(r["rank"]),
@@ -690,8 +664,6 @@ def print_analog_features(
                 r,
                 target_feats,
                 str(n_hours),
-                days_str,
-                r["cal"],
             )
         )
         _print_sub_strips(r["date"], r)
@@ -708,7 +680,6 @@ def print_analog_features(
             avg,
             target_feats,
             "-",
-            "-",
         )
     )
     print(sep)
@@ -723,105 +694,12 @@ def print_analog_features(
     )
 
 
-def print_analogs(analogs: pd.DataFrame, target_date: date, hub: str) -> None:
-    """Top analog days table (simple aggregated view, kept for callers
-    that don't need the daily-feature comparison."""
-    target_dow = DAY_ABBR[target_date.weekday()]
-    print("\n" + "=" * 90)
-    print("  LIKE-DAY ANALOG DAYS (aggregated across HEs)")
-    print(f"  Forecast: {target_date} ({target_dow})  |  Hub: {hub}")
-    print("=" * 90)
-
-    if analogs is None or len(analogs) == 0:
-        print("\n  (no analogs returned)")
-        return
-
-    by_date = (
-        analogs.groupby("date", as_index=False)
-        .agg(
-            n_hours=("hour_ending", "nunique"),
-            mean_distance=("distance", "mean"),
-            summed_weight=("weight", "sum"),
-        )
-        .sort_values("summed_weight", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    n_show = min(len(by_date), 20)
-    display = by_date.head(n_show).copy()
-    display.insert(0, "rank", range(1, len(display) + 1))
-    display["date"] = pd.to_datetime(display["date"]).dt.strftime("%a %b-%d %Y")
-    display["mean_distance"] = display["mean_distance"].map("{:.4f}".format)
-    display["summed_weight"] = display["summed_weight"].map("{:.4f}".format)
-
-    print()
-    print(tabulate(display, headers="keys", tablefmt="simple", showindex=False))
-    total_w = float(by_date["summed_weight"].sum())
-    top5_w = float(by_date.head(5)["summed_weight"].sum())
-    print(
-        f"\n  Total unique dates: {len(by_date)} | "
-        f"Total weight: {total_w:.2f} | "
-        f"Top-5 date weight: {top5_w / total_w:.2%} | "
-        f"Distance range: {analogs['distance'].min():.4f} — {analogs['distance'].max():.4f}"
-    )
+# ── 4) print_forecast ─────────────────────────────────────────────────
 
 
-def _color_signed_cell(val: float, raw: str) -> str:
-    """Wrap a numeric cell in green (positive) / red (negative) ANSI codes.
-    Caller passes the already-formatted ``raw`` string (preserves padding)."""
-    if not _COLOR_ON or val == 0 or not np.isfinite(val):
-        return raw
-    color = _HL_UP if val > 0 else _HL_DOWN
-    stripped = raw.lstrip(" ")
-    leading = raw[: len(raw) - len(stripped)]
-    return f"{leading}{color}{stripped}{_RS}"
-
-
-_BLOCK_HOUR_INDICES: tuple[tuple[str, list[int]], ...] = (
-    ("OnPeak", list(range(7, 23))),
-    ("OffPeak", list(range(0, 7)) + [23]),
-    ("Flat", list(range(24))),
-)
-
-
-def _render_inband_row(date_str: str, in_band_80: list[bool | None]) -> None:
-    """Append an 'InBand 80%' row showing per-hour ✓ / ✗ vs the 80% PI, plus
-    per-block coverage % in the summary cells."""
-    line = f"{date_str:<12} {'InBand 80%':<10}"
-    for h_idx in range(24):
-        b = in_band_80[h_idx] if h_idx < len(in_band_80) else None
-        if b is None:
-            line += f" {'':>6}"
-            continue
-        mark = "✓" if b else "✗"
-        if _COLOR_ON:
-            color = _HL_UP if b else _HL_DOWN
-            line += f" {color}{mark:>6}{_RS}"
-        else:
-            line += f" {mark:>6}"
-
-    for _, idx in _BLOCK_HOUR_INDICES:
-        valid = [
-            in_band_80[i]
-            for i in idx
-            if i < len(in_band_80) and in_band_80[i] is not None
-        ]
-        if valid:
-            pct = sum(1 for b in valid if b) / len(valid) * 100.0
-            line += f" {f'{pct:.0f}%':>7}"
-        else:
-            line += f" {'':>7}"
-    print(line)
-
-
-def print_forecast(
-    table: pd.DataFrame,
-    block_level: dict | None = None,
-) -> None:
-    """Actual / Forecast / Error hourly sub-section with inline level metrics
-    (|Err|, MAPE %, RMSE footer). Caller prints the outer LIKE-DAY FORECAST
-    banner."""
-    print_section("Forecast vs Actuals")
+def print_forecast(table: pd.DataFrame, metrics: dict | None) -> None:
+    """Actual / Forecast / Error table (120-char banner) + metrics block."""
+    print_header("DA LMP LIKE-DAY FORECAST - Western Hub ($/MWh)", "=", 120)
 
     header = f"{'Date':<12} {'Type':<10}"
     for h in range(1, 25):
@@ -829,252 +707,8 @@ def print_forecast(
     header += f" {'OnPk':>7} {'OffPk':>7} {'Flat':>7}"
     print(header)
     print("-" * len(header))
-
-    error_rows = table[table["Type"] == "Error"]
-    err_lo, err_hi = 0.0, 0.0
-    if len(error_rows):
-        err_arr = np.array(
-            [error_rows.iloc[0].get(f"HE{h}") for h in range(1, 25)], dtype=float
-        )
-        err_finite = err_arr[np.isfinite(err_arr)]
-        if len(err_finite):
-            err_lo = float(err_finite.min())
-            err_hi = float(err_finite.max())
 
     for _, row in table.iterrows():
-        is_error_row = row["Type"] == "Error"
-        line = f"{str(row['Date']):<12} {row['Type']:<10}"
-        for h in range(1, 25):
-            val = row.get(f"HE{h}")
-            if pd.notna(val):
-                cell = f" {val:>6.1f}"
-                if is_error_row:
-                    cell = _wrap_gradient(
-                        cell, float(val), err_lo, err_hi, "abs_low_is_good"
-                    )
-                line += cell
-            else:
-                line += f" {'':>6}"
-        for col in ("OnPeak", "OffPeak", "Flat"):
-            val = row.get(col)
-            if pd.notna(val):
-                cell = f" {val:>7.2f}"
-                if is_error_row:
-                    cell = _wrap_gradient(
-                        cell, float(val), err_lo, err_hi, "abs_low_is_good"
-                    )
-                line += cell
-            else:
-                line += f" {'':>7}"
-
-        if not is_error_row:
-            style = _ROW_STYLES.get(row["Type"])
-            if style:
-                line = f"{style}{line}{_RS}"
-        print(line)
-
-    actual_rows = table[table["Type"] == "Actual"]
-    forecast_rows = table[table["Type"] == "Forecast"]
-    if len(actual_rows) and len(forecast_rows):
-        a_row = actual_rows.iloc[0]
-        f_row = forecast_rows.iloc[0]
-        date_str = str(a_row["Date"])
-        actual_arr = np.array([a_row.get(f"HE{h}") for h in range(1, 25)], dtype=float)
-        forecast_arr = np.array(
-            [f_row.get(f"HE{h}") for h in range(1, 25)], dtype=float
-        )
-        abs_err = np.abs(forecast_arr - actual_arr)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            mape_pct = np.where(
-                np.abs(actual_arr) > 1e-9,
-                abs_err / np.abs(actual_arr) * 100.0,
-                np.nan,
-            )
-
-        abs_err_finite = abs_err[np.isfinite(abs_err)]
-        abs_err_lo = float(abs_err_finite.min()) if len(abs_err_finite) else 0.0
-        abs_err_hi = float(abs_err_finite.max()) if len(abs_err_finite) else 0.0
-        mape_finite = mape_pct[np.isfinite(mape_pct)]
-        mape_lo = float(mape_finite.min()) if len(mape_finite) else 0.0
-        mape_hi = float(mape_finite.max()) if len(mape_finite) else 0.0
-
-        def _summary(blk: str, key: str) -> str:
-            if not block_level:
-                return f" {'':>7}"
-            v = block_level.get(blk, {}).get(key)
-            if v is None or not np.isfinite(v):
-                return f" {'':>7}"
-            cell = f" {v:>6.1f}%" if key == "mape" else f" {v:>7.2f}"
-            if key == "mae":
-                return _wrap_gradient(
-                    cell, float(v), abs_err_lo, abs_err_hi, "low_is_good"
-                )
-            if key == "mape":
-                return _wrap_gradient(cell, float(v), mape_lo, mape_hi, "low_is_good")
-            return cell
-
-        line = f"{date_str:<12} {'|Err|':<10}"
-        for h_idx in range(24):
-            v = abs_err[h_idx]
-            if np.isfinite(v):
-                cell = f" {v:>6.1f}"
-                cell = _wrap_gradient(
-                    cell, float(v), abs_err_lo, abs_err_hi, "low_is_good"
-                )
-                line += cell
-            else:
-                line += f" {'':>6}"
-        for blk in ("OnPeak", "OffPeak", "Flat"):
-            line += _summary(blk, "mae")
-        print(line)
-
-        line = f"{date_str:<12} {'MAPE %':<10}"
-        for h_idx in range(24):
-            v = mape_pct[h_idx]
-            if np.isfinite(v):
-                cell = f" {v:>5.1f}%"
-                cell = _wrap_gradient(cell, float(v), mape_lo, mape_hi, "low_is_good")
-                line += cell
-            else:
-                line += f" {'':>6}"
-        for blk in ("OnPeak", "OffPeak", "Flat"):
-            line += _summary(blk, "mape")
-        print(line)
-
-    print("-" * len(header))
-
-    if block_level:
-        rmse_parts = []
-        for blk in ("OnPeak", "OffPeak", "Flat"):
-            v = block_level.get(blk, {}).get("rmse")
-            if v is not None and np.isfinite(v):
-                rmse_parts.append(f"{blk}={v:.2f}")
-        if rmse_parts:
-            print(f"  RMSE:  {'   '.join(rmse_parts)}")
-
-
-def _gradient_color(val: float, lo: float, hi: float, kind: str) -> str:
-    """ANSI 256-color escape for a value's gradient bucket. Empty string when
-    no color should be applied. All gradients align on a single semantic:
-    **dark green = good, dark red = bad**.
-
-    ``kind="low_is_good"`` — lo→dark green, hi→dark red. Use for non-negative
-    metrics where smaller is better (CRPS, MAPE, |Err|, Width).
-    ``kind="abs_low_is_good"`` — value near zero → dark green, far from zero
-    (in either direction) → dark red. Use for signed metrics where being
-    close to zero is good and large excursions in either direction are bad
-    (Error).
-    """
-    if not _COLOR_ON or not np.isfinite(val):
-        return ""
-
-    if kind == "abs_low_is_good":
-        max_abs = max(abs(lo), abs(hi))
-        if max_abs <= 0:
-            return ""
-        norm = abs(val) / max_abs
-    else:
-        if hi <= lo:
-            return ""
-        norm = (val - lo) / (hi - lo)
-
-    # Buckets tuned so the "plain" middle is narrow — a single outlier
-    # (e.g. a +$15 peak miss) can't wash an entire row of $5-7 misses into
-    # neutral territory. ~|val|/max_abs ≥ 0.35 already counts as bad.
-    if norm < 0.10:
-        return _DARK_GREEN_256
-    if norm < 0.20:
-        return _GREEN_256
-    if norm < 0.35:
-        return ""
-    if norm < 0.65:
-        return _RED_256
-    return _DARK_RED_256
-
-
-def _wrap_gradient(raw_cell: str, val: float, lo: float, hi: float, kind: str) -> str:
-    """Wrap ``raw_cell`` in the gradient color for ``val``. Preserves leading
-    spaces so column alignment stays stable."""
-    color = _gradient_color(val, lo, hi, kind)
-    if not color:
-        return raw_cell
-    stripped = raw_cell.lstrip(" ")
-    leading = raw_cell[: len(raw_cell) - len(stripped)]
-    return f"{leading}{color}{stripped}{_RS}"
-
-
-def _render_per_hour_metric_row(
-    date_str: str,
-    label: str,
-    values: np.ndarray,
-    fmt: str,
-    summary_fmt: str,
-    gradient_kind: str | None = None,
-) -> None:
-    """Per-HE metric row with mean-per-block summary cells (OnPk / OffPk / Flat).
-
-    Pass ``gradient_kind="low_is_good"`` for non-negative metrics where
-    smaller is better (CRPS, |Err|, MAPE, Width); pass ``"signed"`` for
-    metrics whose direction matters (Error). Cells are colored on a
-    normalized [min, max] scale across the per-HE values.
-    """
-    finite = values[np.isfinite(values)] if len(values) else np.array([])
-    lo = float(finite.min()) if len(finite) else 0.0
-    hi = float(finite.max()) if len(finite) else 0.0
-
-    line = f"{date_str:<12} {label:<10}"
-    for h_idx in range(24):
-        v = values[h_idx] if h_idx < len(values) else np.nan
-        if np.isfinite(v):
-            cell = f" {v:>{fmt}}"
-            if gradient_kind:
-                cell = _wrap_gradient(cell, float(v), lo, hi, gradient_kind)
-            line += cell
-        else:
-            line += f" {'':>6}"
-    for _, idx in _BLOCK_HOUR_INDICES:
-        block_vals = [
-            values[i] for i in idx if i < len(values) and np.isfinite(values[i])
-        ]
-        if block_vals:
-            mean = float(np.mean(block_vals))
-            cell = f" {mean:>{summary_fmt}}"
-            if gradient_kind:
-                cell = _wrap_gradient(cell, mean, lo, hi, gradient_kind)
-            line += cell
-        else:
-            line += f" {'':>7}"
-    print(line)
-
-
-def print_band_calibration(
-    output_table: pd.DataFrame,
-    quantiles_table: pd.DataFrame,
-    in_band_80: list[bool | None] | None = None,
-    crps_per_hour: np.ndarray | None = None,
-) -> None:
-    """Calibration sub-section: P10 / Actual / P90 / InBand 80% / CRPS.
-    Width / IQR / Skew / Δ P50 live in the upstream Quantile Bands section
-    since they don't require actuals. Renders only when an Actual row and
-    the P10/P90 quantile rows are available."""
-    if quantiles_table is None or len(quantiles_table) == 0:
-        return
-    p10_rows = quantiles_table[quantiles_table["Type"] == "P10"]
-    p90_rows = quantiles_table[quantiles_table["Type"] == "P90"]
-    actual_rows = output_table[output_table["Type"] == "Actual"]
-    if not len(p10_rows) or not len(p90_rows) or not len(actual_rows):
-        return
-
-    print_section("Quantile Bands vs Actuals")
-
-    header = f"{'Date':<12} {'Type':<10}"
-    for h in range(1, 25):
-        header += f" {h:>6}"
-    header += f" {'OnPk':>7} {'OffPk':>7} {'Flat':>7}"
-    print(header)
-    print("-" * len(header))
-
-    for row in (p10_rows.iloc[0], actual_rows.iloc[0], p90_rows.iloc[0]):
         line = f"{str(row['Date']):<12} {row['Type']:<10}"
         for h in range(1, 25):
             val = row.get(f"HE{h}")
@@ -1087,38 +721,48 @@ def print_band_calibration(
             line = f"{style}{line}{_RS}"
         print(line)
 
-    date_str = str(actual_rows.iloc[0]["Date"])
-
-    if in_band_80 is not None and any(b is not None for b in in_band_80):
-        _render_inband_row(date_str, in_band_80)
-    if crps_per_hour is not None and np.isfinite(crps_per_hour).any():
-        _render_per_hour_metric_row(
-            date_str,
-            "CRPS",
-            crps_per_hour,
-            "6.3f",
-            "7.3f",
-            gradient_kind="low_is_good",
-        )
-
     print("-" * len(header))
+
+    if metrics:
+        if {"mae", "rmse", "mape"}.issubset(metrics.keys()):
+            print(
+                f"  MAE: ${metrics['mae']:.2f}/MWh  |  "
+                f"RMSE: ${metrics['rmse']:.2f}/MWh  |  "
+                f"MAPE: {metrics['mape']:.1f}%"
+            )
+        if "rmae" in metrics:
+            verdict = "better" if metrics["rmae"] < 1 else "worse"
+            print(
+                f"  rMAE vs naive (last week): {metrics['rmae']:.3f} "
+                f"({verdict} than naive)"
+            )
+        cov_parts: list[str] = []
+        for label, key in (
+            ("80%PI", "coverage_80pct"),
+            ("90%PI", "coverage_90pct"),
+            ("98%PI", "coverage_98pct"),
+        ):
+            if metrics.get(key) is not None:
+                cov_parts.append(f"{label}={metrics[key]:.0%}")
+        if cov_parts:
+            print(f"  Coverage: {' | '.join(cov_parts)}")
+        if metrics.get("sharpness_90pct") is not None:
+            print(f"  Sharpness (90%PI width): ${metrics['sharpness_90pct']:.2f}/MWh")
+        if "crps" in metrics:
+            print(f"  CRPS: {metrics['crps']:.4f}")
+
+    print()
+    print_divider("=", 120, dim=False)
+    print()
+
+
+# ── 5) print_quantiles ────────────────────────────────────────────────
 
 
 def print_quantiles(table: pd.DataFrame) -> None:
-    """Quantile bands sub-section ($/MWh). Caller prints the outer LIKE-DAY
-    FORECAST banner."""
-    print_section("Quantile Bands ($/MWh)")
-    print(
-        f"  {_HL_NOTE}Per-HE bands: weighted quantile of analog LMPs at that"
-        " hour (each analog contributes its hour's price; weight = inverse"
-        f" feature distance).{_RS}"
-    )
-    print(
-        f"  {_HL_NOTE}OnPeak / OffPeak / Flat aggregates: per-date joint"
-        " sampling — each analog's window mean is one weighted sample, so"
-        f" within-day price comovement is preserved.{_RS}"
-    )
-    print()
+    """Quantile bands table (P25 / P37.5 / P50 / Forecast / P62.5 / P75)."""
+    print("  Quantile Bands ($/MWh)")
+    print("-" * 100)
 
     header = f"{'Date':<12} {'Band':<10}"
     for h in range(1, 25):
@@ -1140,54 +784,4 @@ def print_quantiles(table: pd.DataFrame) -> None:
             line = f"{style}{line}{_RS}"
         print(line)
 
-    p10_rows = table[table["Type"] == "P10"]
-    p25_rows = table[table["Type"] == "P25"]
-    p50_rows = table[table["Type"] == "P50"]
-    p75_rows = table[table["Type"] == "P75"]
-    p90_rows = table[table["Type"] == "P90"]
-
-    def _arr(row: pd.Series | None) -> np.ndarray:
-        if row is None:
-            return np.full(24, np.nan)
-        return np.array([row.get(f"HE{h}") for h in range(1, 25)], dtype=float)
-
-    if len(p10_rows) and len(p90_rows):
-        date_str = str(p10_rows.iloc[0]["Date"])
-        p10 = _arr(p10_rows.iloc[0])
-        p25 = _arr(p25_rows.iloc[0]) if len(p25_rows) else np.full(24, np.nan)
-        p50 = _arr(p50_rows.iloc[0]) if len(p50_rows) else np.full(24, np.nan)
-        p75 = _arr(p75_rows.iloc[0]) if len(p75_rows) else np.full(24, np.nan)
-        p90 = _arr(p90_rows.iloc[0])
-
-        print("-" * len(header))
-        width = p90 - p10
-        _render_per_hour_metric_row(
-            date_str, "Width", width, "6.2f", "7.2f", gradient_kind="low_is_good"
-        )
-        if np.isfinite(p25).any() and np.isfinite(p75).any():
-            iqr = p75 - p25
-            _render_per_hour_metric_row(
-                date_str, "IQR", iqr, "6.2f", "7.2f", gradient_kind="low_is_good"
-            )
-        if np.isfinite(p50).any():
-            skew = (p90 - p50) - (p50 - p10)
-            _render_per_hour_metric_row(
-                date_str,
-                "Skew",
-                skew,
-                "+6.2f",
-                "+7.2f",
-                gradient_kind="abs_low_is_good",
-            )
-            d_p50 = np.full(24, np.nan)
-            d_p50[1:] = np.diff(p50)
-            _render_per_hour_metric_row(
-                date_str,
-                "Δ P50",
-                d_p50,
-                "+6.2f",
-                "+7.2f",
-                gradient_kind="abs_low_is_good",
-            )
-
-    print("-" * len(header))
+    print("-" * len(header) + "\n")

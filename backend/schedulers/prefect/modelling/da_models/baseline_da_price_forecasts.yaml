@@ -1,0 +1,59 @@
+name: helioscta-modelling-pjm-baseline-da-price
+
+prefect-version: 3.0.0
+
+build: null
+push: null
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+
+  # ────── Baseline DA-Price -- Next 14 Days ──────
+  # Preflight (data_validation/forecast_next_14_days) then publish the multi-day
+  # Meteologica DA-price baseline: one pjm_model_outputs.forecast_runs row per
+  # forward delivery date, all sharing one run_id.
+
+  - name: PJM Baseline DA-Price Next 14 Days
+    entrypoint: schedulers/prefect/modelling/da_models/baseline_da_price_forecasts_flows.py:pjm_baseline_da_price_next_14_days
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    tags: [pjm, modelling, da_price, baseline, next_14_days]
+    schedules:
+
+      # ────── Every 30 min, 05:00-11:00 MST ──────
+      # MST = America/Phoenix (no DST). Two cron entries so the window closes at
+      # 11:00 exactly: :00/:30 from 05h through 10h, plus 11:00. The preflight in
+      # the flow no-ops cheaply when the Meteologica vintage hasn't moved, so the
+      # repeated runs just re-publish the same vintage (latest-by-created_at
+      # dedupes for the frontend) until a fresher export lands.
+      - cron: "0,30 5-9 * * *"
+        timezone: "America/Phoenix"
+      - cron: "0 10 * * *"
+        timezone: "America/Phoenix"
+
+  # ────── Baseline DA-Price -- ICE-Anchored Single Day ──────
+  # Preflight (data_validation/forecast_single_day_ice_anchored) then publish
+  # tomorrow's row, anchored to the ICE PDA D1-IUS VWAP. Re-runs through the
+  # morning so the anchor keeps picking up new D1-IUS fills as liquidity builds.
+
+  - name: PJM Baseline DA-Price ICE-Anchored Single Day
+    entrypoint: schedulers/prefect/modelling/da_models/baseline_da_price_forecasts_flows.py:pjm_baseline_da_price_ice_anchored_single_day
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    tags: [pjm, modelling, da_price, baseline, ice_anchored, single_day]
+    schedules:
+
+      # ────── Every 30 min, 05:00-11:00 MST ──────
+      # MST = America/Phoenix (no DST). Two cron entries so the window closes at
+      # 11:00 exactly. Each run re-pulls the ICE ticker, so the published anchor
+      # tracks the latest VWAP; the preflight WARNs (not errors) when ICE has no
+      # fills yet, so early runs still publish the unanchored fallback.
+      - cron: "0,30 5-9 * * *"
+        timezone: "America/Phoenix"
+      - cron: "0 10 * * *"
+        timezone: "America/Phoenix"

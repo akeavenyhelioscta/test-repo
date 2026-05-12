@@ -1,8 +1,7 @@
-"""Data-validation preflight for the ``like_day_model_knn_sunny`` forecast.
+"""Data-validation preflight for ``pjm_rto_hourly/pipelines/forecast_single_day.py``.
 
-Run this BEFORE
-``pjm_rto_hourly/pipelines/forecast_single_day.py``. It loads the model's core
-inputs and asserts structural validity, prints a per-check report, and raises
+Run this BEFORE that pipeline. It loads the model's core inputs and asserts
+structural validity, prints a per-check report, and raises
 :class:`DataValidationError` on any ERROR-severity failure. It writes nothing
 and never touches the forecast pipeline.
 
@@ -17,14 +16,13 @@ Coverage today (the inputs whose absence/corruption breaks the run hardest):
 
 TODO: deeper per-domain coverage (DA-cutoff load forecast vintages, outage
 forecast history, fuel mix, gas) is not yet asserted here — those flow through
-``like_day_model_knn_sunny/domains.py`` and degrade gracefully (``_safe_load``
+``like_day_model_knn/domains.py`` and degrade gracefully (``_safe_load``
 returns ``None``) rather than hard-failing, so they're lower priority. Add
 column-level checks for them when a real bug warrants it.
 
 Usage::
 
-    python -m backend.modelling.da_models.like_day_model_knn_sunny.preflight
-    python modelling/da_models/like_day_model_knn_sunny/preflight.py
+    python -m backend.modelling.da_models.like_day_model_knn.data_validation.forecast_single_day
 
 Exit code is 0 when inputs are healthy, non-zero (DataValidationError) otherwise.
 """
@@ -35,7 +33,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+_REPO_ROOT = Path(__file__).resolve().parents[5]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -58,7 +56,7 @@ from backend.modelling.da_models.common.validation.checks import (  # noqa: E402
     CheckResult,
     CheckStatus,
 )
-from backend.modelling.da_models.like_day_model_knn_sunny import configs  # noqa: E402
+from backend.modelling.da_models.like_day_model_knn import configs  # noqa: E402
 from backend.utils.logging_utils import init_logging, print_header  # noqa: E402
 
 # ── Defaults (mirror pjm_rto_hourly/pipelines/forecast_single_day.py) ──────
@@ -186,12 +184,13 @@ def run(
         if callable(reconfigure):
             reconfigure(encoding="utf-8", errors="replace")
 
-    pl = init_logging(name="preflight_like_day_model_knn_sunny", log_dir=LOG_DIR)
+    pl = init_logging(name="preflight_like_day_knn_single_day", log_dir=LOG_DIR)
     try:
         resolved_date = _resolve_target_date(target_date)
         if not quiet:
             print_header(
-                f"PREFLIGHT - like_day_model_knn_sunny | {hub} | target {resolved_date}",
+                f"PREFLIGHT - like_day_model_knn forecast_single_day | {hub} | "
+                f"target {resolved_date}",
                 "=",
                 100,
             )

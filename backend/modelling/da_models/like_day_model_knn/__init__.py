@@ -1,11 +1,16 @@
-"""KNN load-only DA LMP forecast model.
+"""KNN like-day forecaster — per-hour scalar variant.
 
-The model lives in its own subfolder with a dedicated builder, engine,
-forecast, and single_day backtest:
+Holds the per-hour scalar implementation:
 
-  per_hour/                - 3-hour window features      x per-hour matching
+  - long-format pool (one row per (date, hour_ending))
+  - scalar per-target-HE matching (no window)
+  - sum-Euclidean over valid z-scored dims (no /n_valid)
+  - linear pre-selection age penalty, days-based half-life
+  - inverse-distance² post-selection weighting
+  - joint MC quantile bands for OnPeak/OffPeak/Flat aggregates
 
-Shared values (constants, per-model ``ModelSpec`` registry) live in configs.py.
-Shared parquet loaders + LMP-label pivoting live in _shared.py.
-Shared dashboard figure helpers live in diagnostics_common.py.
+Forecast subpackage: ``pjm_rto_hourly/``.
+
+Cross-family imports flow forward only: this package may import from
+``backend.modelling.da_models.common`` only.
 """

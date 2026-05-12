@@ -1,11 +1,14 @@
-"""Build the run-JSON payload for pjm_rto_hourly and extract its OnPeak
-forecast for the shared publisher.
+"""Build the run-JSON payload for the like_day_model_knn forecaster
+(model_name ``pjm_rto_hourly``) and extract its OnPeak forecast for the
+shared publisher.
 
-See ``modelling/da_models/common/publish.py`` for the upsert. This module
-exposes ``build_payload`` (model-specific payload construction) and
-``extract_onpeak_forecast`` (pulls the OnPeak HE 8-23 point forecast out
-of the payload's ``blocks[]`` array). The pipeline composes the two and
-hands the result to the shared publisher.
+See ``backend/modelling/da_models/common/publish.py`` for the upsert. This is a KNN
+like-day forecaster (single hub, per-HE point + quantiles, weighted analog
+days). ``build_payload`` builds the model-specific payload;
+``extract_onpeak_forecast`` pulls the OnPeak HE 8-23 point forecast out of the
+payload's ``blocks[]`` array. (It lives at the family root rather than under
+``pjm_rto_hourly/`` so a future sibling subpackage can reuse it without crossing
+the forward-import boundary into ``like_day_model_knn``.)
 """
 
 from __future__ import annotations
@@ -77,7 +80,7 @@ _QUANTILE_LABELS: tuple[str, ...] = ("P10", "P25", "P50", "Forecast", "P75", "P9
 
 
 def _build_blocks(quantiles_table: pd.DataFrame) -> list[dict[str, Any]]:
-    """Extract OnPeak / OffPeak / Flat × P10..P90+Forecast (18 rows)."""
+    """Extract OnPeak / OffPeak / Flat x P10..P90+Forecast (18 rows)."""
     out: list[dict[str, Any]] = []
     if quantiles_table is None or len(quantiles_table) == 0:
         return out
@@ -190,7 +193,7 @@ def build_payload(
 ) -> dict[str, Any]:
     """Build the run-JSON payload (dict). Pure function; no IO.
 
-    ``created_at_utc`` / ``created_at_local`` default to "now" — pass
+    ``created_at_utc`` / ``created_at_local`` default to "now" -- pass
     explicit values when you want the payload's timestamps to match
     the row's columns.
     """
@@ -231,7 +234,7 @@ def extract_onpeak_forecast(payload: dict) -> float | None:
 
     KNN payloads encode blocks as ``{block, quantile_label, value}``;
     the headline number is the row with ``block='OnPeak'`` and
-    ``quantile_label='Forecast'`` (the deterministic point — see
+    ``quantile_label='Forecast'`` (the deterministic point -- see
     ``_QUANTILE_LABELS``). Returns None when the block is missing or
     the value is None.
     """

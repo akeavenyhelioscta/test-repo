@@ -1,10 +1,10 @@
 """Single source of truth for the ``pjm_model_outputs.forecast_runs`` upsert.
 
 All forecaster families publish through this function -- see
-``modelling/CLAUDE.md``. Each family owns ``build_payload`` and
+``backend/modelling/README.md``. Each family owns ``build_payload`` and
 ``extract_onpeak_forecast`` in its own ``publish.py``; this module owns the
 row layout and delegates the DDL + write to
-``utils.azure_postgresql_utils.upsert_to_azure_postgresql`` -- which
+``backend.utils.azure_postgresql_utils.upsert_to_azure_postgresql`` -- which
 ``CREATE SCHEMA / TABLE IF NOT EXISTS`` on first call, COPYs the row into a
 temp table, and upserts on the primary key. (That helper also appends its
 own ``created_at`` / ``updated_at`` audit columns to the table.)

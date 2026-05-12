@@ -1,7 +1,7 @@
 """Build the run-JSON payload for the ICE-anchored Meteologica DA-price
 baseline and extract its OnPeak forecast for the shared publisher.
 
-See ``modelling/da_models/common/publish.py`` for the upsert. This
+See ``backend/modelling/da_models/common/publish.py`` for the upsert. This
 module exposes ``build_payload`` (model-specific payload construction
 including the ICE anchor block + ENS bands + trade list) and
 ``extract_onpeak_forecast`` (pulls the deterministic OnPeak HE 8-23

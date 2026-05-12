@@ -1,21 +1,28 @@
 """Feature-domain plugins for like_day_model_knn.
 
-A domain produces a pool feature frame (one row per historical delivery date)
-and a query feature frame (one row for the target delivery date), both keyed
-by ``date``. The variant builders concatenate domains by inner-joining on
-``date`` and then optionally broadcast across ``hour_ending`` for ``per_hour``.
+Each domain returns a long-format frame:
 
-Pool features prefer the historical DA-cutoff forecast where the parquet
-covers all 24 hours of the date, falling back to RT actuals for pre-backfill
-dates (via ``loader.load_load_coalesced``). Query features come from the
-DA-cutoff forecast for ``target_date``. Pool and query therefore share the
-same forecast signal in the overlap window — apples-to-apples at decision
-time — while old history still contributes via RT.
+  - Hourly domains:           (date, hour_ending, *feature_cols)
+  - Daily-broadcast domains:  (date, *feature_cols)        — no hour_ending
+
+``_shared.py`` joins hourly domains on ``(date, hour_ending)`` and
+broadcasts daily domains across the 24 HEs of each date.
+
+Loader-API note. Sunny's original ``forecast.py`` calls
+``_safe_load_vintage(load_fn, cache_dir, vintage="lead1")`` against an
+older loader API that accepted a ``vintage=`` keyword. The current
+``common.data.loader`` either accepts ``lead_days=1`` (for
+``load_load_forecast`` / ``load_outages_forecast_history``) or has no
+vintage kwarg (for ``load_solar_forecast`` /
+``load_meteologica_*_forecast``) and instead carries an ``as_of_date``
+column the caller must filter on. ``_safe_load_lead1`` here adapts
+between the two — same behavior, current API.
 """
 
 from __future__ import annotations
 
-import math
+import inspect
+import logging
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -26,60 +33,28 @@ import pandas as pd
 
 from backend.modelling.da_models.common.data import loader
 
-# Region used everywhere a region filter applies.
+logger = logging.getLogger(__name__)
+
 RTO = "RTO"
 
-# Wide-format hourly col conventions used INSIDE pool builders (each
-# domain still pivots its source data to ``{stem}_h1..{stem}_h24`` —
-# no change to per-domain pool/query construction). The wide cols are
-# then melted to long-format scalars by ``_shared.build_pool_from_spec``;
-# spec ``feature_groups`` reference the long col names listed below.
-LOAD_HOURLY_COLS = [f"load_h{h}" for h in range(1, 25)]
-LOAD_RAMP_1H_HOURLY_COLS = [f"load_ramp_1h_h{h}" for h in range(1, 25)]
-LOAD_RAMP_3H_HOURLY_COLS = [f"load_ramp_3h_h{h}" for h in range(1, 25)]
-SOLAR_HOURLY_COLS = [f"solar_h{h}" for h in range(1, 25)]
-WIND_HOURLY_COLS = [f"wind_h{h}" for h in range(1, 25)]
-NET_LOAD_HOURLY_COLS = [f"net_load_h{h}" for h in range(1, 25)]
-TEMP_HOURLY_COLS = [f"temp_h{h}" for h in range(1, 25)]
-OUTAGE_LEVEL_COLS = ["outage_total_mw"]  # sunny parity: total only
-GAS_LEVEL_COLS = ["gas_m3_avg"]
-CALENDAR_LEVEL_COLS = ["dow_sin", "dow_cos", "is_weekend"]
 
-# Long-format scalar col names that ``feature_groups`` reference. These
-# are the cols on the post-melt (date, hour_ending) rows — sunny-compatible
-# names so cross-family code can share the schema.
-LOAD_AT_HOUR_COL = "load_mw_at_hour"
-SOLAR_AT_HOUR_COL = "solar_at_hour"
-WIND_AT_HOUR_COL = "wind_at_hour"
-NET_LOAD_AT_HOUR_COL = "net_load_at_hour"
-TEMP_AT_HOUR_COL = "temp_at_hour"
-LOAD_RAMP_1H_AT_HOUR_COL = "load_ramp_1h_at_hour"
-LOAD_RAMP_3H_AT_HOUR_COL = "load_ramp_3h_at_hour"
-LMP_AT_HOUR_COL = "lmp"
-
-# Wide-stem → long-col mapping used by the melt step in
-# ``_shared._melt_pool_to_long``. Stem here is the prefix BEFORE the
-# ``_h{N}`` suffix on a wide col (e.g. ``load_ramp_1h_h7`` → stem
-# ``load_ramp_1h``).
-HOURLY_STEM_TO_LONG_COL: dict[str, str] = {
-    "load": LOAD_AT_HOUR_COL,
-    "solar": SOLAR_AT_HOUR_COL,
-    "wind": WIND_AT_HOUR_COL,
-    "net_load": NET_LOAD_AT_HOUR_COL,
-    "temp": TEMP_AT_HOUR_COL,
-    "load_ramp_1h": LOAD_RAMP_1H_AT_HOUR_COL,
-    "load_ramp_3h": LOAD_RAMP_3H_AT_HOUR_COL,
-    "lmp": LMP_AT_HOUR_COL,
-}
+# ── FeatureDomain ──────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class FeatureDomain:
     """A toggleable feature domain.
 
-    ``pool_builder``: returns historical features keyed by ``date``.
-    ``query_builder``: returns one row of features for ``target_date``.
-    Both produce identical column sets so the engine sees a uniform schema.
+    ``pool_builder``: returns the full historical feature frame.
+        - Hourly domain frames: long form ``(date, hour_ending, *cols)``.
+        - Daily-broadcast frames: ``(date, *cols)``; ``_shared.py``
+          replicates them across all 24 HEs of the date.
+
+    ``query_builder``: returns the same shape for ``target_date`` —
+    24 rows for hourly, 1 row for daily-broadcast.
+
+    The schema (presence of ``hour_ending``) is the only signal
+    ``_shared.py`` uses to distinguish hourly vs broadcast.
     """
 
     name: str
@@ -99,816 +74,788 @@ class FeatureDomain:
         return seen
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# ── Loader helpers (faithful to forecast.py:55-176) ────────────────────
+
+
+def _safe_load(
+    load_fn: Callable, cache_dir: Path | None, **kwargs
+) -> pd.DataFrame | None:
+    """Wrap a loader call with try/except — returns None on failure."""
+    try:
+        return load_fn(cache_dir=cache_dir, **kwargs)
+    except Exception as exc:
+        logger.warning("Optional loader %s failed: %s", load_fn.__name__, exc)
+        return None
+
+
+def _filter_lead1(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Filter rows to ``as_of_date == date - 1`` (lead-1 / DA-cutoff vintage).
+
+    No-op when the frame is None/empty or lacks ``as_of_date``. Idempotent
+    when the loader has already pre-filtered (``load_load_forecast``).
+    """
+    if df is None or len(df) == 0 or "as_of_date" not in df.columns:
+        return df
+    delta = (
+        pd.to_datetime(df["date"], errors="coerce")
+        - pd.to_datetime(df["as_of_date"], errors="coerce")
+    ).dt.days
+    return df[delta == 1].copy()
+
+
+def _safe_load_lead1(load_fn: Callable, cache_dir: Path | None) -> pd.DataFrame | None:
+    """Lead-1 vintage loader. Uses ``lead_days=1`` when the function
+    accepts it; otherwise loads then filters ``as_of_date == date - 1``.
+
+    Maps Sunny's ``_safe_load_vintage(..., vintage="lead1")`` onto the
+    current loader API.
+    """
+    try:
+        sig = inspect.signature(load_fn)
+        if "lead_days" in sig.parameters:
+            return _safe_load(load_fn, cache_dir, lead_days=1)
+    except (TypeError, ValueError):
+        pass
+    df = _safe_load(load_fn, cache_dir)
+    return _filter_lead1(df) if df is not None else None
 
 
 def _to_date(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s).dt.date
 
 
-def _select_query_vintage(df: pd.DataFrame) -> pd.DataFrame:
-    """Pick the right vintage for a single-target-date forecast query.
-
-    Caller is expected to have already filtered ``df`` to a single
-    ``target_date``. This helper then chooses which vintage row(s) to
-    keep:
-
-      1. **Strict D+1 vintage** (``as_of_date == target_date - 1``).
-         Used when present — preserves historical backtest semantics
-         (DA-cutoff is always the canonical "what we knew at decision
-         time" snapshot).
-      2. **Latest available vintage** as a fallback. When the strict
-         D+1 vintage is missing — typical for ``target_date >= today + 2``,
-         where no D+1 publish exists yet — pick the row(s) with the
-         most-recent ``as_of_date``. This is the same rule that powers
-         the loader's ``latest_only=True`` mode and unlocks D+2 / D+3
-         / ... forecasts.
-
-    Returns the input frame unchanged when no ``as_of_date`` column is
-    present (live marts that don't carry vintages) or the frame is
-    empty.
-    """
-    if df is None or len(df) == 0 or "as_of_date" not in df.columns:
-        return df
-    df = df.copy()
-    df["as_of_date"] = _to_date(df["as_of_date"])
-    delta = (
-        pd.to_datetime(df["date"], errors="coerce")
-        - pd.to_datetime(df["as_of_date"], errors="coerce")
-    ).dt.days
-    d1 = df[delta == 1]
-    if len(d1) > 0:
-        return d1
-    return df[df["as_of_date"] == df["as_of_date"].max()]
-
-
-def _select_query_lead_days(df: pd.DataFrame) -> pd.DataFrame:
-    """Variant of ``_select_query_vintage`` for feeds that store the
-    vintage as a ``lead_days`` column instead of an ``as_of_date`` (PJM
-    outages forecast — published once daily with rows for lead_days
-    0..7).
-
-    Caller is expected to have already filtered ``df`` to a single
-    target date. This helper then chooses which row to keep:
-
-      1. **lead_days=1** (DA-cutoff) when present — preserves backtest
-         semantics on historical target_dates.
-      2. **Smallest available lead_days** as a fallback. For
-         target_date = today + N where N >= 2, no lead_days=1 row
-         exists yet (that would be tomorrow's publish), but today's
-         publish carries a lead_days=N row covering it. Picking
-         min(lead_days) selects today's vintage.
-    """
-    if df is None or len(df) == 0 or "lead_days" not in df.columns:
-        return df
-    d1 = df[df["lead_days"] == 1]
-    if len(d1) > 0:
-        return d1
-    return df[df["lead_days"] == df["lead_days"].min()]
-
-
-def _hourly_load_profile(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
-    """Wide pivot of hourly load: one col per HE, named load_h1..load_h24."""
-    return _hourly_value_profile(df, value_col, output_prefix="load")
-
-
-def _hourly_value_profile(
-    df: pd.DataFrame,
-    value_col: str,
-    output_prefix: str,
-) -> pd.DataFrame:
-    """Generic wide pivot: one col per HE, named ``{output_prefix}_h1..{output_prefix}_h24``."""
-    out_cols = [f"{output_prefix}_h{h}" for h in range(1, 25)]
+def _filter_region(df: pd.DataFrame, region: str = RTO) -> pd.DataFrame:
+    """Restrict to a region when the column exists; otherwise pass through."""
     if df is None or len(df) == 0:
-        return pd.DataFrame(columns=["date"] + out_cols)
-    work = df[["date", "hour_ending", value_col]].copy()
-    work["date"] = _to_date(work["date"])
-    work["hour_ending"] = pd.to_numeric(work["hour_ending"], errors="coerce").astype(
+        return df
+    if "region" in df.columns:
+        return df[df["region"].astype(str) == region].copy()
+    return df
+
+
+def _fallback_fill(
+    base: pd.DataFrame,
+    target_col: str,
+    source_df: pd.DataFrame | None,
+    source_col: str,
+    on: tuple[str, ...] = ("date", "hour_ending"),
+) -> pd.DataFrame:
+    """Fill nulls in ``base[target_col]`` from ``source_df[source_col]``
+    joined on ``on``. Mirror of ``forecast.py:154-167``."""
+    if source_df is None or len(source_df) == 0 or source_col not in source_df.columns:
+        return base
+    fb = source_df[list(on) + [source_col]].rename(
+        columns={source_col: f"_fb_{target_col}"}
+    )
+    out = base.merge(fb, on=list(on), how="left")
+    out[target_col] = out[target_col].fillna(out[f"_fb_{target_col}"])
+    return out.drop(columns=[f"_fb_{target_col}"])
+
+
+def _empty_long(cols: list[str]) -> pd.DataFrame:
+    """Empty long-format frame with the given feature cols."""
+    return pd.DataFrame(columns=["date", "hour_ending"] + cols)
+
+
+def _empty_daily(cols: list[str]) -> pd.DataFrame:
+    """Empty daily-broadcast frame."""
+    return pd.DataFrame(columns=["date"] + cols)
+
+
+# ── rto_load_scalar ────────────────────────────────────────────────────
+# Pool prefers RT realized; falls back to lead-1 forecast where RT is
+# missing. Query prefers lead-1 forecast; falls back to RT (so backtests
+# on past dates still work). Faithful to forecast.py:215-230, 351-374.
+
+
+def _build_rto_load_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    df_rt = _safe_load(loader.load_load_rt, cache_dir)
+    base = _empty_long(["load_mw_at_hour"])
+    if df_rt is not None and len(df_rt) > 0:
+        rt = _filter_region(df_rt)
+        if "rt_load_mw" in rt.columns:
+            base = rt[["date", "hour_ending", "rt_load_mw"]].rename(
+                columns={"rt_load_mw": "load_mw_at_hour"}
+            )
+
+    df_fc = _safe_load_lead1(loader.load_load_forecast, cache_dir)
+    if df_fc is not None and "forecast_load_mw" in df_fc.columns:
+        fc = _filter_region(df_fc)
+        if len(base) == 0:
+            base = fc[["date", "hour_ending", "forecast_load_mw"]].rename(
+                columns={"forecast_load_mw": "load_mw_at_hour"}
+            )
+        else:
+            base = _fallback_fill(base, "load_mw_at_hour", fc, "forecast_load_mw")
+
+    if len(base) == 0:
+        return base
+    base["date"] = _to_date(base["date"])
+    base["hour_ending"] = pd.to_numeric(base["hour_ending"], errors="coerce").astype(
         "Int64"
     )
-    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
-    work = work.dropna(subset=["date", "hour_ending", value_col])
-    if len(work) == 0:
-        return pd.DataFrame(columns=["date"] + out_cols)
-    work["hour_ending"] = work["hour_ending"].astype(int)
-
-    pivot = work.pivot_table(
-        index="date",
-        columns="hour_ending",
-        values=value_col,
-        aggfunc="mean",
-    ).reindex(columns=range(1, 25))
-    pivot = pivot.rename(columns={h: f"{output_prefix}_h{h}" for h in range(1, 25)})
-    return pivot.reset_index()
+    base = base.dropna(subset=["date", "hour_ending"]).copy()
+    base["hour_ending"] = base["hour_ending"].astype(int)
+    return base.sort_values(["date", "hour_ending"]).reset_index(drop=True)
 
 
-# ── rto_load_profile ─────────────────────────────────────────────────────
-
-# Multi-day-horizon support for the meteo_* domain query builders is
-# routed through ``_select_query_vintage`` (defined above): D+1 vintage
-# preferred for backtest reproducibility, latest-available vintage as
-# fallback for D+2 / D+3 / ... target dates. The PJM-native query
-# builders below still hard-filter to the DA-cutoff vintage — extending
-# them is a separate PR (PJM-native horizon is shorter and the
-# load_load_forecast loader already filters to lead_days=1 by default).
-
-
-def _build_rto_load_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    # Reads from the unified supply-demand coalescer so load shares a single
-    # forecast-vs-RT decision per (region, date) with the sibling solar/wind/
-    # net_load pool builders. Cross-series source consistency in the pool
-    # eliminates vintage skew between sibling features.
-    df = loader.load_pjm_supply_demand_coalesced(cache_dir=cache_dir, region=RTO)
-    return _hourly_value_profile(df, "load_mw", output_prefix="load")
-
-
-def _build_rto_load_profile_query(
+def _build_rto_load_scalar_query(
     target_date: date, cache_dir: Path | None
 ) -> pd.DataFrame:
-    df = loader.load_load_forecast(cache_dir=cache_dir)
-    df = df[df["region"].astype(str) == RTO].copy()
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    return _hourly_load_profile(df, "forecast_load_mw")
+    df_fc = _safe_load_lead1(loader.load_load_forecast, cache_dir)
+    if df_fc is not None and len(df_fc) > 0 and "forecast_load_mw" in df_fc.columns:
+        fc = _filter_region(df_fc)
+        fc = fc[_to_date(fc["date"]) == target_date]
+        if len(fc) > 0:
+            out = fc[["date", "hour_ending", "forecast_load_mw"]].rename(
+                columns={"forecast_load_mw": "load_mw_at_hour"}
+            )
+            out["date"] = _to_date(out["date"])
+            out["hour_ending"] = pd.to_numeric(
+                out["hour_ending"], errors="coerce"
+            ).astype(int)
+            return out
+
+    df_rt = _safe_load(loader.load_load_rt, cache_dir)
+    if df_rt is not None and len(df_rt) > 0:
+        rt = _filter_region(df_rt)
+        rt = rt[_to_date(rt["date"]) == target_date]
+        if len(rt) > 0 and "rt_load_mw" in rt.columns:
+            out = rt[["date", "hour_ending", "rt_load_mw"]].rename(
+                columns={"rt_load_mw": "load_mw_at_hour"}
+            )
+            out["date"] = _to_date(out["date"])
+            out["hour_ending"] = pd.to_numeric(
+                out["hour_ending"], errors="coerce"
+            ).astype(int)
+            return out
+    return _empty_long(["load_mw_at_hour"])
 
 
-RTO_LOAD_PROFILE = FeatureDomain(
-    name="rto_load_profile",
-    description=(
-        "RTO load — 24 hourly cols (load_h1..load_h24) as a single group. "
-        "Time-of-day bucketing is redundant under per-HE windowed matching "
-        "(``flt_radius`` already localizes the match), so the spec-side "
-        "split was removed in favor of one ``load_level`` group; tune the "
-        "single weight rather than five sub-bucket weights."
-    ),
+RTO_LOAD_SCALAR = FeatureDomain(
+    name="rto_load_scalar",
+    description="RTO load scalar at target HE. Pool: RT->forecast fallback; query: forecast->RT fallback.",
+    feature_groups={"load_at_hour": ["load_mw_at_hour"]},
+    feature_group_weights={"load_at_hour": 3.0},
+    pool_builder=_build_rto_load_scalar_pool,
+    query_builder=_build_rto_load_scalar_query,
+)
+
+
+# ── temperature_scalar ─────────────────────────────────────────────────
+# Pool: observed → forecast fallback. Query: forecast → observed fallback.
+
+
+def _build_temperature_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    """Pool reads from the unified observed-first weather coalescer so the
+    pool's (observed | forecast) decision is centralized in
+    ``loader.load_weather_coalesced``. Mirrors the load / solar / wind
+    domains that consume their respective coalesced loaders."""
+    df = _safe_load(loader.load_weather_coalesced, cache_dir)
+    if df is None or len(df) == 0 or "temp" not in df.columns:
+        return _empty_long(["temp_at_hour"])
+    base = df[["date", "hour_ending", "temp"]].rename(columns={"temp": "temp_at_hour"})
+    base["date"] = _to_date(base["date"])
+    base["hour_ending"] = pd.to_numeric(base["hour_ending"], errors="coerce").astype(
+        "Int64"
+    )
+    base = base.dropna(subset=["date", "hour_ending"]).copy()
+    base["hour_ending"] = base["hour_ending"].astype(int)
+    return base.sort_values(["date", "hour_ending"]).reset_index(drop=True)
+
+
+def _build_temperature_scalar_query(
+    target_date: date, cache_dir: Path | None
+) -> pd.DataFrame:
+    """Forecast-first per-target-date fallback to observed.
+
+    Sunny's original ``forecast.py:377-386`` only swaps to observed when
+    the forecast frame is fully empty. The live weather forecast mart
+    only carries future dates (~today onward), so for any backtest target
+    date in the past the forecast frame is non-empty but lacks the
+    target's rows — the original silently returned NaN temperatures.
+    Here we additionally fall back to observed when the forecast frame
+    has no rows for ``target_date``, which is what the pool already does
+    and what makes backtests usable.
+    """
+    out_cols = [["date", "hour_ending", "temp"]]
+    _ = out_cols
+
+    def _slice(df: pd.DataFrame | None) -> pd.DataFrame:
+        if df is None or "temp" not in df.columns or len(df) == 0:
+            return _empty_long(["temp_at_hour"])
+        sl = df[_to_date(df["date"]) == target_date]
+        if len(sl) == 0:
+            return _empty_long(["temp_at_hour"])
+        out = sl[["date", "hour_ending", "temp"]].rename(
+            columns={"temp": "temp_at_hour"}
+        )
+        out["date"] = _to_date(out["date"])
+        out["hour_ending"] = pd.to_numeric(out["hour_ending"], errors="coerce").astype(
+            int
+        )
+        return out
+
+    df_fc = _safe_load(loader.load_weather_forecast_hourly, cache_dir)
+    out = _slice(df_fc)
+    if len(out) > 0:
+        return out
+    df_obs = _safe_load(loader.load_weather_observed_hourly, cache_dir)
+    if df_obs is None or len(df_obs) == 0:
+        df_obs = _safe_load(loader.load_weather_hourly, cache_dir)
+    return _slice(df_obs)
+
+
+TEMPERATURE_SCALAR = FeatureDomain(
+    name="temperature_scalar",
+    description="Hourly temperature scalar. Pool: observed->forecast fallback; query: forecast->observed fallback.",
+    feature_groups={"weather_at_hour": ["temp_at_hour"]},
+    feature_group_weights={"weather_at_hour": 2.0},
+    pool_builder=_build_temperature_scalar_pool,
+    query_builder=_build_temperature_scalar_query,
+)
+
+
+# ── solar_scalar / wind_scalar ─────────────────────────────────────────
+# Both follow the same fallback chain: lead-1 PJM forecast → lead-1
+# Meteologica → realized fuel_mix. Faithful to forecast.py:251-289 / 388-440.
+
+
+def _prep_meteo(df: pd.DataFrame | None, value_col: str) -> pd.DataFrame | None:
+    if df is None or value_col not in df.columns or len(df) == 0:
+        return None
+    out = _filter_region(df)
+    return out[["date", "hour_ending", value_col]].drop_duplicates(
+        subset=["date", "hour_ending"], keep="first"
+    )
+
+
+def _build_renewable_scalar_pool(
+    cache_dir: Path | None,
+    *,
+    forecast_loader: Callable,
+    meteo_loader: Callable,
+    forecast_col: str,
+    fuel_mix_col: str,
+    output_col: str,
+) -> pd.DataFrame:
+    base = _empty_long([output_col])
+    base[output_col] = pd.Series(dtype=float)
+
+    df_fc = _safe_load_lead1(forecast_loader, cache_dir)
+    if df_fc is not None and forecast_col in df_fc.columns:
+        out = df_fc[["date", "hour_ending", forecast_col]].rename(
+            columns={forecast_col: output_col}
+        )
+        base = out
+
+    df_meteo = _prep_meteo(_safe_load_lead1(meteo_loader, cache_dir), forecast_col)
+    if df_meteo is not None:
+        if len(base) == 0:
+            base = df_meteo.rename(columns={forecast_col: output_col})
+        else:
+            base = _fallback_fill(base, output_col, df_meteo, forecast_col)
+
+    df_fm = _safe_load(loader.load_fuel_mix, cache_dir)
+    if df_fm is not None and fuel_mix_col in df_fm.columns:
+        if len(base) == 0:
+            base = df_fm[["date", "hour_ending", fuel_mix_col]].rename(
+                columns={fuel_mix_col: output_col}
+            )
+        else:
+            base = _fallback_fill(base, output_col, df_fm, fuel_mix_col)
+
+    if len(base) == 0:
+        return base
+    base["date"] = _to_date(base["date"])
+    base["hour_ending"] = pd.to_numeric(base["hour_ending"], errors="coerce").astype(
+        "Int64"
+    )
+    base = base.dropna(subset=["date", "hour_ending"]).copy()
+    base["hour_ending"] = base["hour_ending"].astype(int)
+    return base.sort_values(["date", "hour_ending"]).reset_index(drop=True)
+
+
+def _build_renewable_scalar_query(
+    target_date: date,
+    cache_dir: Path | None,
+    *,
+    forecast_loader: Callable,
+    meteo_loader: Callable,
+    forecast_col: str,
+    output_col: str,
+) -> pd.DataFrame:
+    df_fc = _safe_load_lead1(forecast_loader, cache_dir)
+    base = _empty_long([output_col])
+    if df_fc is not None and forecast_col in df_fc.columns:
+        df = df_fc[_to_date(df_fc["date"]) == target_date]
+        if len(df) > 0:
+            base = df[["date", "hour_ending", forecast_col]].rename(
+                columns={forecast_col: output_col}
+            )
+
+    df_meteo = _prep_meteo(_safe_load_lead1(meteo_loader, cache_dir), forecast_col)
+    if df_meteo is not None:
+        df_meteo = df_meteo[_to_date(df_meteo["date"]) == target_date]
+        if len(df_meteo) > 0:
+            renamed = df_meteo.rename(columns={forecast_col: output_col})
+            if len(base) == 0:
+                base = renamed
+            else:
+                base = _fallback_fill(base, output_col, renamed, output_col)
+
+    if len(base) == 0:
+        return base
+    base["date"] = _to_date(base["date"])
+    base["hour_ending"] = pd.to_numeric(base["hour_ending"], errors="coerce").astype(
+        int
+    )
+    return base
+
+
+def _build_solar_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    return _build_renewable_scalar_pool(
+        cache_dir,
+        forecast_loader=loader.load_solar_forecast,
+        meteo_loader=loader.load_meteologica_solar_forecast,
+        forecast_col="solar_forecast",
+        fuel_mix_col="solar",
+        output_col="solar_at_hour",
+    )
+
+
+def _build_solar_scalar_query(
+    target_date: date, cache_dir: Path | None
+) -> pd.DataFrame:
+    return _build_renewable_scalar_query(
+        target_date,
+        cache_dir,
+        forecast_loader=loader.load_solar_forecast,
+        meteo_loader=loader.load_meteologica_solar_forecast,
+        forecast_col="solar_forecast",
+        output_col="solar_at_hour",
+    )
+
+
+def _build_wind_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    return _build_renewable_scalar_pool(
+        cache_dir,
+        forecast_loader=loader.load_wind_forecast,
+        meteo_loader=loader.load_meteologica_wind_forecast,
+        forecast_col="wind_forecast",
+        fuel_mix_col="wind",
+        output_col="wind_at_hour",
+    )
+
+
+def _build_wind_scalar_query(target_date: date, cache_dir: Path | None) -> pd.DataFrame:
+    return _build_renewable_scalar_query(
+        target_date,
+        cache_dir,
+        forecast_loader=loader.load_wind_forecast,
+        meteo_loader=loader.load_meteologica_wind_forecast,
+        forecast_col="wind_forecast",
+        output_col="wind_at_hour",
+    )
+
+
+SOLAR_SCALAR = FeatureDomain(
+    name="solar_scalar",
+    description="Hourly solar scalar (ablation-only). Lead-1 PJM -> lead-1 Meteologica -> fuel_mix.",
+    feature_groups={"solar": ["solar_at_hour"]},
+    feature_group_weights={"solar": 1.0},
+    pool_builder=_build_solar_scalar_pool,
+    query_builder=_build_solar_scalar_query,
+)
+
+WIND_SCALAR = FeatureDomain(
+    name="wind_scalar",
+    description="Hourly wind scalar (ablation-only). Lead-1 PJM -> lead-1 Meteologica -> fuel_mix.",
+    feature_groups={"wind": ["wind_at_hour"]},
+    feature_group_weights={"wind": 1.0},
+    pool_builder=_build_wind_scalar_pool,
+    query_builder=_build_wind_scalar_query,
+)
+
+
+# Combined renewable_at_hour domain - Sunny groups solar + wind under one
+# distance-metric group called "renewable_at_hour" with weight 1.5.
+
+
+def _build_renewable_at_hour_pool(cache_dir: Path | None) -> pd.DataFrame:
+    solar = _build_solar_scalar_pool(cache_dir)
+    wind = _build_wind_scalar_pool(cache_dir)
+    if len(solar) == 0 and len(wind) == 0:
+        return _empty_long(["solar_at_hour", "wind_at_hour"])
+    if len(solar) == 0:
+        wind = wind.copy()
+        wind["solar_at_hour"] = np.nan
+        return wind[["date", "hour_ending", "solar_at_hour", "wind_at_hour"]]
+    if len(wind) == 0:
+        solar = solar.copy()
+        solar["wind_at_hour"] = np.nan
+        return solar[["date", "hour_ending", "solar_at_hour", "wind_at_hour"]]
+    return solar.merge(wind, on=["date", "hour_ending"], how="outer")
+
+
+def _build_renewable_at_hour_query(
+    target_date: date, cache_dir: Path | None
+) -> pd.DataFrame:
+    solar = _build_solar_scalar_query(target_date, cache_dir)
+    wind = _build_wind_scalar_query(target_date, cache_dir)
+    if len(solar) == 0 and len(wind) == 0:
+        return _empty_long(["solar_at_hour", "wind_at_hour"])
+    if len(solar) == 0:
+        wind = wind.copy()
+        wind["solar_at_hour"] = np.nan
+        return wind[["date", "hour_ending", "solar_at_hour", "wind_at_hour"]]
+    if len(wind) == 0:
+        solar = solar.copy()
+        solar["wind_at_hour"] = np.nan
+        return solar[["date", "hour_ending", "solar_at_hour", "wind_at_hour"]]
+    return solar.merge(wind, on=["date", "hour_ending"], how="outer")
+
+
+RENEWABLE_AT_HOUR_SCALAR = FeatureDomain(
+    name="renewable_at_hour_scalar",
+    description="Combined hourly solar + wind scalars; one distance group `renewable_at_hour`.",
+    feature_groups={"renewable_at_hour": ["solar_at_hour", "wind_at_hour"]},
+    feature_group_weights={"renewable_at_hour": 1.5},
+    pool_builder=_build_renewable_at_hour_pool,
+    query_builder=_build_renewable_at_hour_query,
+)
+
+
+# ── load_ramps_scalar ──────────────────────────────────────────────────
+# 1h and 3h load deltas. Wrap across day boundary: HE1's 1h ramp uses
+# the prior date's HE24. Faithful to forecast.py:124-149 (pool) and
+# 472-496 (query — prepends previous-day RT load before computing).
+
+
+def _add_load_ramps(
+    df: pd.DataFrame, source_col: str = "load_mw_at_hour"
+) -> pd.DataFrame:
+    if source_col not in df.columns:
+        df["load_ramp_1h_at_hour"] = np.nan
+        df["load_ramp_3h_at_hour"] = np.nan
+        return df
+    out = df.sort_values(["date", "hour_ending"]).reset_index(drop=True).copy()
+    src = out[source_col].astype(float).to_numpy()
+    shift1 = np.concatenate(([np.nan], src[:-1]))
+    shift3 = np.concatenate(([np.nan, np.nan, np.nan], src[:-3]))
+    out["load_ramp_1h_at_hour"] = src - shift1
+    out["load_ramp_3h_at_hour"] = src - shift3
+    return out
+
+
+def _build_load_ramps_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    """Reuse rto_load_scalar's pool then derive ramps over the sorted timeline."""
+    base = _build_rto_load_scalar_pool(cache_dir)
+    if len(base) == 0:
+        return _empty_long(["load_ramp_1h_at_hour", "load_ramp_3h_at_hour"])
+    out = _add_load_ramps(base[["date", "hour_ending", "load_mw_at_hour"]])
+    return out[
+        ["date", "hour_ending", "load_ramp_1h_at_hour", "load_ramp_3h_at_hour"]
+    ].reset_index(drop=True)
+
+
+def _build_load_ramps_scalar_query(
+    target_date: date, cache_dir: Path | None
+) -> pd.DataFrame:
+    """Compute target-date ramps with previous-day RT load prepended.
+
+    Mirrors forecast.py:472-496: build the query's load row, prepend
+    yesterday's RT load row, sort, compute diffs over the combined
+    timeline, then drop the prepended rows so HE1's 1h ramp correctly
+    references yesterday's HE24.
+    """
+    target_load = _build_rto_load_scalar_query(target_date, cache_dir)
+    if len(target_load) == 0:
+        return _empty_long(["load_ramp_1h_at_hour", "load_ramp_3h_at_hour"])
+
+    prev_date = pd.Timestamp(target_date) - pd.Timedelta(days=1)
+    prev_date_d = prev_date.date()
+
+    df_rt = _safe_load(loader.load_load_rt, cache_dir)
+    prev_load = pd.DataFrame(columns=["date", "hour_ending", "load_mw_at_hour"])
+    if df_rt is not None and len(df_rt) > 0:
+        rt = _filter_region(df_rt)
+        rt = rt[_to_date(rt["date"]) == prev_date_d]
+        if len(rt) > 0 and "rt_load_mw" in rt.columns:
+            prev_load = rt[["date", "hour_ending", "rt_load_mw"]].rename(
+                columns={"rt_load_mw": "load_mw_at_hour"}
+            )
+            prev_load["date"] = _to_date(prev_load["date"])
+            prev_load["hour_ending"] = pd.to_numeric(prev_load["hour_ending"]).astype(
+                int
+            )
+
+    if len(prev_load) > 0:
+        combined = pd.concat(
+            [prev_load.assign(__keep=False), target_load.assign(__keep=True)],
+            ignore_index=True,
+        )
+        combined = combined.sort_values(["date", "hour_ending"]).reset_index(drop=True)
+        combined = _add_load_ramps(combined)
+        out = combined.loc[
+            combined["__keep"],
+            ["date", "hour_ending", "load_ramp_1h_at_hour", "load_ramp_3h_at_hour"],
+        ].reset_index(drop=True)
+    else:
+        # No previous-day load — HE1's ramp will be NaN, which is correct.
+        out = _add_load_ramps(target_load.copy())
+        out = out[
+            ["date", "hour_ending", "load_ramp_1h_at_hour", "load_ramp_3h_at_hour"]
+        ]
+
+    out["date"] = _to_date(out["date"])
+    out["hour_ending"] = pd.to_numeric(out["hour_ending"]).astype(int)
+    return out
+
+
+LOAD_RAMPS_SCALAR = FeatureDomain(
+    name="load_ramps_scalar",
+    description="1h and 3h load ramps at target HE; wraps across day boundary via prepended prev-day load.",
     feature_groups={
-        "load_level": [LOAD_AT_HOUR_COL],
+        "load_ramp_1h_at_hour": ["load_ramp_1h_at_hour"],
+        "load_ramp_3h_at_hour": ["load_ramp_3h_at_hour"],
     },
     feature_group_weights={
-        "load_level": 3,
+        "load_ramp_1h_at_hour": 1.5,
+        "load_ramp_3h_at_hour": 1.5,
     },
-    pool_builder=_build_rto_load_profile_pool,
-    query_builder=_build_rto_load_profile_query,
+    pool_builder=_build_load_ramps_scalar_pool,
+    query_builder=_build_load_ramps_scalar_query,
 )
 
 
-# ── solar_profile (per-HE level) ─────────────────────────────────────────
-# Designed for per_hour matching: 24 hourly cols participate in the dynamic
-# 3-hour window distance, parallel to rto_load_profile. Pool reads from the
-# unified supply-demand coalescer so the (forecast | RT) decision is shared
-# with load and wind on every (region, date). RT actuals fill pre-2019
-# (and any partial-coverage) dates with no cross-series mixing risk.
+# ── rto_net_load_scalar (faithful to Sunny's derivation) ───────────────
+# Sunny's _add_net_load: net_load = load - solar.fillna(0) - wind.fillna(0).
+# Treats missing renewables as zero so net_load stays computable when a
+# forecast is missing (errs slightly toward over-counting net load).
+# Identity-breaking by design — DO NOT migrate to the unified-coalescer
+# path here (that's the sibling like_day_model_knn behavior).
 
 
-def _build_solar_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_pjm_supply_demand_coalesced(cache_dir=cache_dir, region=RTO)
-    return _hourly_value_profile(df, "solar_mw", output_prefix="solar")
+def _build_rto_net_load_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    load = _build_rto_load_scalar_pool(cache_dir)
+    solar = _build_solar_scalar_pool(cache_dir)
+    wind = _build_wind_scalar_pool(cache_dir)
+    if len(load) == 0:
+        return _empty_long(["net_load_at_hour"])
+
+    out = load.merge(solar, on=["date", "hour_ending"], how="left")
+    out = out.merge(wind, on=["date", "hour_ending"], how="left")
+    s = out.get("solar_at_hour", pd.Series(np.nan, index=out.index))
+    w = out.get("wind_at_hour", pd.Series(np.nan, index=out.index))
+    out["net_load_at_hour"] = (
+        out["load_mw_at_hour"].astype(float)
+        - s.fillna(0.0).astype(float)
+        - w.fillna(0.0).astype(float)
+    )
+    out.loc[out["load_mw_at_hour"].isna(), "net_load_at_hour"] = np.nan
+    return out[["date", "hour_ending", "net_load_at_hour"]].reset_index(drop=True)
 
 
-def _build_solar_profile_query(
+def _build_rto_net_load_scalar_query(
     target_date: date, cache_dir: Path | None
 ) -> pd.DataFrame:
-    df = loader.load_solar_forecast(cache_dir=cache_dir).copy()
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    val = "solar_forecast" if "solar_forecast" in df.columns else "solar_mw"
-    return _hourly_value_profile(df, val, output_prefix="solar")
+    load = _build_rto_load_scalar_query(target_date, cache_dir)
+    solar = _build_solar_scalar_query(target_date, cache_dir)
+    wind = _build_wind_scalar_query(target_date, cache_dir)
+    if len(load) == 0:
+        return _empty_long(["net_load_at_hour"])
+
+    out = load.merge(solar, on=["date", "hour_ending"], how="left")
+    out = out.merge(wind, on=["date", "hour_ending"], how="left")
+    s = out.get("solar_at_hour", pd.Series(np.nan, index=out.index))
+    w = out.get("wind_at_hour", pd.Series(np.nan, index=out.index))
+    out["net_load_at_hour"] = (
+        out["load_mw_at_hour"].astype(float)
+        - s.fillna(0.0).astype(float)
+        - w.fillna(0.0).astype(float)
+    )
+    out.loc[out["load_mw_at_hour"].isna(), "net_load_at_hour"] = np.nan
+    return out[["date", "hour_ending", "net_load_at_hour"]].reset_index(drop=True)
 
 
-SOLAR_PROFILE = FeatureDomain(
-    name="solar_profile",
-    description="Solar — scalar ``solar_at_hour`` per (date, HE) row.",
-    feature_groups={"solar_level": [SOLAR_AT_HOUR_COL]},
-    feature_group_weights={"solar_level": 1.5},
-    pool_builder=_build_solar_profile_pool,
-    query_builder=_build_solar_profile_query,
-)
-
-
-# ── wind_profile (per-HE level) ──────────────────────────────────────────
-
-
-def _build_wind_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    # Same single-source-decision reasoning as load and solar — see
-    # _build_rto_load_profile_pool.
-    df = loader.load_pjm_supply_demand_coalesced(cache_dir=cache_dir, region=RTO)
-    return _hourly_value_profile(df, "wind_mw", output_prefix="wind")
-
-
-def _build_wind_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    df = loader.load_wind_forecast(cache_dir=cache_dir).copy()
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    val = "wind_forecast" if "wind_forecast" in df.columns else "wind_mw"
-    return _hourly_value_profile(df, val, output_prefix="wind")
-
-
-WIND_PROFILE = FeatureDomain(
-    name="wind_profile",
-    description="Wind — scalar ``wind_at_hour`` per (date, HE) row.",
-    feature_groups={"wind_level": [WIND_AT_HOUR_COL]},
-    feature_group_weights={"wind_level": 1.5},
-    pool_builder=_build_wind_profile_pool,
-    query_builder=_build_wind_profile_query,
-)
-
-
-# ── renewable_profile (combined solar+wind, sunny parity) ───────────────
-# Both stems in a single ``renewable_level`` feature group. Sunny's
-# ``renewable_at_hour_scalar`` does the same — solar and wind share one
-# weight and one per-group distance, so the engine doesn't double-count
-# renewable signal vs ours where solar/wind were separately weighted.
-# Underlying cols still named solar_h*/wind_h* so existing windowed-
-# stem registries (engine._WINDOWED_COL_STEMS) keep emitting them.
-
-
-def _build_renewable_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_pjm_supply_demand_coalesced(cache_dir=cache_dir, region=RTO)
-    solar_pool = _hourly_value_profile(df, "solar_mw", output_prefix="solar")
-    wind_pool = _hourly_value_profile(df, "wind_mw", output_prefix="wind")
-    return solar_pool.merge(wind_pool, on="date", how="outer")
-
-
-def _build_renewable_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    solar_df = loader.load_solar_forecast(cache_dir=cache_dir).copy()
-    solar_df["date"] = _to_date(solar_df["date"])
-    solar_df = solar_df[solar_df["date"] == target_date]
-    val_s = "solar_forecast" if "solar_forecast" in solar_df.columns else "solar_mw"
-    solar_q = _hourly_value_profile(solar_df, val_s, output_prefix="solar")
-
-    wind_df = loader.load_wind_forecast(cache_dir=cache_dir).copy()
-    wind_df["date"] = _to_date(wind_df["date"])
-    wind_df = wind_df[wind_df["date"] == target_date]
-    val_w = "wind_forecast" if "wind_forecast" in wind_df.columns else "wind_mw"
-    wind_q = _hourly_value_profile(wind_df, val_w, output_prefix="wind")
-
-    return solar_q.merge(wind_q, on="date", how="outer")
-
-
-RENEWABLE_PROFILE = FeatureDomain(
-    name="renewable_profile",
+RTO_NET_LOAD_SCALAR = FeatureDomain(
+    name="rto_net_load_scalar",
     description=(
-        "Combined solar+wind — 48 hourly cols (solar_h1..solar_h24, "
-        "wind_h1..wind_h24) as a single ``renewable_level`` group. "
-        "Mirrors sunny's renewable_at_hour_scalar: both stems share one "
-        "spec weight and one per-group distance, avoiding double-counting "
-        "of renewable signal vs the split solar_profile + wind_profile."
+        "Net load = load - solar.fillna(0) - wind.fillna(0). Faithful to "
+        "Sunny's NaN-as-zero derivation; identity does NOT hold when "
+        "renewables forecasts have gaps."
     ),
-    feature_groups={
-        "renewable_level": [SOLAR_AT_HOUR_COL, WIND_AT_HOUR_COL],
-    },
-    feature_group_weights={"renewable_level": 1.5},
-    pool_builder=_build_renewable_profile_pool,
-    query_builder=_build_renewable_profile_query,
+    feature_groups={"net_load_at_hour": ["net_load_at_hour"]},
+    feature_group_weights={"net_load_at_hour": 2.0},
+    pool_builder=_build_rto_net_load_scalar_pool,
+    query_builder=_build_rto_net_load_scalar_query,
 )
 
 
-# ── rto_net_load_profile (per-HE level, identity-safe) ──────────────────
-# Net load = load - solar - wind. Pool reads from the unified supply-demand
-# coalescer so the four components share a single source decision per
-# (region, date), preserving the identity by construction. Avoids the
-# cross-source mixing artifact that breaks `load - solar - wind` when the
-# per-series coalescers disagree on forecast-vs-RT (e.g. 2025-05-01).
+# ── outages_scalar (daily-broadcast) ───────────────────────────────────
+# Single col: outage_total_mw. Pool: lead-1 forecast → actuals fallback.
+# Query: lead-1 forecast only. Faithful to forecast.py:305-324, 451-462.
 
 
-def _build_rto_net_load_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_pjm_supply_demand_coalesced(cache_dir=cache_dir, region=RTO)
-    return _hourly_value_profile(df, "net_load_mw", output_prefix="net_load")
+def _build_outages_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    base = _empty_daily(["outage_total_mw"])
+    df_fc = _safe_load(loader.load_outages_forecast_history, cache_dir, lead_days=1)
+    if df_fc is not None and len(df_fc) > 0:
+        of = _filter_region(df_fc)
+        date_col = "forecast_date" if "forecast_date" in of.columns else "date"
+        of = of[[date_col, "total_outages_mw"]].rename(columns={date_col: "date"})
+        of = of.drop_duplicates(subset=["date"], keep="first")
+        of["date"] = _to_date(of["date"])
+        of = of.rename(columns={"total_outages_mw": "outage_total_mw"})
+        base = of[["date", "outage_total_mw"]]
+
+    df_actual = _safe_load(loader.load_outages_actual, cache_dir)
+    if df_actual is not None and len(df_actual) > 0:
+        oa = _filter_region(df_actual)
+        if "total_outages_mw" in oa.columns:
+            oa = oa[["date", "total_outages_mw"]].rename(
+                columns={"total_outages_mw": "_outage_actual"}
+            )
+            oa["date"] = _to_date(oa["date"])
+            base = base.merge(oa, on="date", how="outer")
+            if "outage_total_mw" not in base.columns:
+                base["outage_total_mw"] = np.nan
+            base["outage_total_mw"] = base["outage_total_mw"].fillna(
+                base["_outage_actual"]
+            )
+            base = base.drop(columns=["_outage_actual"])
+
+    return base.sort_values("date").reset_index(drop=True)[["date", "outage_total_mw"]]
 
 
-def _build_rto_net_load_profile_query(
+def _build_outages_scalar_query(
     target_date: date, cache_dir: Path | None
 ) -> pd.DataFrame:
-    df = loader.load_pjm_net_load_forecast(cache_dir=cache_dir).copy()
-    df = df[df["region"].astype(str) == RTO]
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    if "as_of_date" in df.columns and len(df) > 0:
-        df["as_of_date"] = _to_date(df["as_of_date"])
-        delta = (
-            pd.to_datetime(df["date"], errors="coerce")
-            - pd.to_datetime(df["as_of_date"], errors="coerce")
-        ).dt.days
-        df = df[delta == 1]
-    return _hourly_value_profile(df, "net_load_forecast_mw", output_prefix="net_load")
-
-
-RTO_NET_LOAD_PROFILE = FeatureDomain(
-    name="rto_net_load_profile",
-    description=(
-        "RTO net load (load - solar - wind), unified-source — 24 hourly cols "
-        "(net_load_h1..net_load_h24) as a single group. Pool from the "
-        "unified supply-demand coalescer; query from the DA-cutoff net-load "
-        "forecast (lead_days=1). Time-of-day bucketing dropped in favor of "
-        "one ``net_load_level`` group, mirroring rto_load_profile."
-    ),
-    feature_groups={
-        "net_load_level": [NET_LOAD_AT_HOUR_COL],
-    },
-    # Mirrors RTO_LOAD_PROFILE so the two demand domains contribute
-    # comparably when both are enabled. Sunny's net_load_at_hour=2.0.
-    feature_group_weights={
-        "net_load_level": 2,
-    },
-    pool_builder=_build_rto_net_load_profile_pool,
-    query_builder=_build_rto_net_load_profile_query,
-)
-
-
-# ── outages_level (daily, broadcast across HEs) ──────────────────────────
-# Outages MW are published daily by PJM — no hourly granularity exists.
-# Daily-broadcast features bias which candidate dates rank high overall;
-# they don't differentiate between HEs of a given candidate date.
-
-
-def _outages_level_features(df_rto: pd.DataFrame) -> pd.DataFrame:
-    if df_rto is None or len(df_rto) == 0:
-        return pd.DataFrame(columns=["date"] + OUTAGE_LEVEL_COLS)
-    date_col = "forecast_date" if "forecast_date" in df_rto.columns else "date"
-    df = df_rto[[date_col, "total_outages_mw"]].copy()
-    df = df.rename(columns={date_col: "date", "total_outages_mw": "outage_total_mw"})
-    df["date"] = _to_date(df["date"])
-    df["outage_total_mw"] = pd.to_numeric(df["outage_total_mw"], errors="coerce")
-    df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
-    return df[["date"] + OUTAGE_LEVEL_COLS]
-
-
-def _build_outages_level_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_outages_forecast_history(cache_dir=cache_dir, lead_days=1)
-    df = df[df["region"].astype(str) == RTO]
-    return _outages_level_features(df)
-
-
-def _build_outages_level_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    # Load all vintages (lead_days=None) and let _select_query_lead_days
-    # pick the right row: lead_days=1 for historical / D+1 targets,
-    # smallest available lead_days (= most recent publish) for D+2..D+7
-    # future targets.
-    df = loader.load_outages_forecast_history(cache_dir=cache_dir, lead_days=None)
-    df = df[df["region"].astype(str) == RTO].copy()
-    date_col = "forecast_date" if "forecast_date" in df.columns else "date"
-    df["date"] = _to_date(df[date_col])
-    df = df[df["date"] == target_date]
-    df = _select_query_lead_days(df)
-    if len(df) == 0:
-        empty = {"date": target_date, **{c: np.nan for c in OUTAGE_LEVEL_COLS}}
-        return pd.DataFrame([empty])
-    row = df.iloc[0]
+    df_fc = _safe_load(loader.load_outages_forecast_history, cache_dir, lead_days=1)
+    if df_fc is None or len(df_fc) == 0:
+        return pd.DataFrame([{"date": target_date, "outage_total_mw": np.nan}])
+    of = _filter_region(df_fc)
+    date_col = "forecast_date" if "forecast_date" in of.columns else "date"
+    of = of.copy()
+    of["date"] = _to_date(of[date_col])
+    of = of[of["date"] == target_date]
+    if len(of) == 0:
+        return pd.DataFrame([{"date": target_date, "outage_total_mw": np.nan}])
+    val = pd.to_numeric(of.iloc[0].get("total_outages_mw"), errors="coerce")
     return pd.DataFrame(
         [
             {
                 "date": target_date,
-                "outage_total_mw": float(row.get("total_outages_mw", np.nan)),
+                "outage_total_mw": float(val) if pd.notna(val) else np.nan,
             }
         ]
-    )[["date"] + OUTAGE_LEVEL_COLS]
+    )
 
 
-OUTAGES_LEVEL = FeatureDomain(
-    name="outages_level",
-    description=(
-        "RTO outages — total MW only (sunny parity). The planned/forced "
-        "split was dropped; sunny's outage_daily uses total only and the "
-        "split was inflating outage's per-group sum-Euclidean distance "
-        "(sqrt(3) vs sqrt(1)) without adding orthogonal signal."
-    ),
-    feature_groups={"outage_level": OUTAGE_LEVEL_COLS},
-    feature_group_weights={"outage_level": 1.5},
-    pool_builder=_build_outages_level_pool,
-    query_builder=_build_outages_level_query,
+OUTAGES_SCALAR = FeatureDomain(
+    name="outages_scalar",
+    description="Single-col daily outage total (MW). Daily-broadcast across HEs.",
+    feature_groups={"outage_daily": ["outage_total_mw"]},
+    feature_group_weights={"outage_daily": 1.5},
+    pool_builder=_build_outages_scalar_pool,
+    query_builder=_build_outages_scalar_query,
 )
 
 
-# ── gas_level (daily, broadcast across HEs) ──────────────────────────────
-# Hourly gas ticks exist but next-day cash gas settles once per day; daily
-# mean of M3 is the right denoising for next-day LMP prediction.
+# ── gas_scalar (daily-broadcast) ───────────────────────────────────────
+# Daily mean of M3 across whatever hubs are available for the date.
+# Faithful to forecast.py:292-300.
 
 
-def _gas_level_features(df: pd.DataFrame) -> pd.DataFrame:
+def _build_gas_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    df = _safe_load(loader.load_gas_prices_hourly, cache_dir)
     if df is None or len(df) == 0 or "gas_m3" not in df.columns:
-        return pd.DataFrame(columns=["date"] + GAS_LEVEL_COLS)
+        return _empty_daily(["gas_m3_daily_avg"])
     work = df[["date", "gas_m3"]].copy()
     work["date"] = _to_date(work["date"])
     work["gas_m3"] = pd.to_numeric(work["gas_m3"], errors="coerce")
     work = work.dropna(subset=["date", "gas_m3"])
-    if len(work) == 0:
-        return pd.DataFrame(columns=["date"] + GAS_LEVEL_COLS)
-    daily = work.groupby("date", as_index=False).agg(gas_m3_avg=("gas_m3", "mean"))
-    return daily[["date"] + GAS_LEVEL_COLS]
+    daily = work.groupby("date", as_index=False).agg(
+        gas_m3_daily_avg=("gas_m3", "mean")
+    )
+    return (
+        daily[["date", "gas_m3_daily_avg"]].sort_values("date").reset_index(drop=True)
+    )
 
 
-def _build_gas_level_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_gas_prices_hourly(cache_dir=cache_dir)
-    return _gas_level_features(df)
-
-
-def _build_gas_level_query(target_date: date, cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_gas_prices_hourly(cache_dir=cache_dir)
-    daily = _gas_level_features(df)
+def _build_gas_scalar_query(target_date: date, cache_dir: Path | None) -> pd.DataFrame:
+    daily = _build_gas_scalar_pool(cache_dir)
     out = daily[daily["date"] == target_date]
     if len(out) == 0:
-        out = pd.DataFrame([{"date": target_date, "gas_m3_avg": np.nan}])
-    return out[["date"] + GAS_LEVEL_COLS]
+        return pd.DataFrame([{"date": target_date, "gas_m3_daily_avg": np.nan}])
+    return out.reset_index(drop=True)
 
 
-GAS_LEVEL = FeatureDomain(
-    name="gas_level",
-    description="Gas — 1 daily level col (M3 cash daily mean). Broadcast across HEs.",
-    feature_groups={"gas_level": GAS_LEVEL_COLS},
-    feature_group_weights={"gas_level": 2.0},
-    pool_builder=_build_gas_level_pool,
-    query_builder=_build_gas_level_query,
+GAS_SCALAR = FeatureDomain(
+    name="gas_scalar",
+    description="Daily mean M3 cash gas across available hubs. Daily-broadcast across HEs.",
+    feature_groups={"gas_daily": ["gas_m3_daily_avg"]},
+    feature_group_weights={"gas_daily": 2.0},
+    pool_builder=_build_gas_scalar_pool,
+    query_builder=_build_gas_scalar_query,
 )
 
 
-# ── load_ramps_profile (derived from rto_load_profile, windowed) ─────────
-# Intra-day load ramps captured as a peer of the load level. Mirrors
-# sunny's ``load_ramp_1h_at_hour`` and ``load_ramp_3h_at_hour`` features
-# but at the wide-format level: we materialize 24 ramp values per date
-# (one per HE), and the per-HE windowed Euclidean picks the relevant
-# subset. HE=1 1h-ramp and HE<=3 3h-ramp are NaN (no in-day predecessor) —
-# the engine's NaN-aware mask drops them from per-HE distance.
+# ── calendar_scalar (no-op pool/query — cols supplied by _shared._attach_calendar) ──
+# Sunny includes calendar features (is_weekend, dow_sin, dow_cos) in the
+# distance metric and turns the hard DOW/weekend filters OFF; the empirical
+# justification is in his configs.py docstring (no-filter beats DOW filter
+# on MAE / coverage / pinball over the 2025-04 to 2025-05 window). The
+# pool/query builders are no-ops because _shared.py already attaches all
+# five calendar cols to every long-format row; this domain only declares
+# the distance group + weight.
 
 
-def _compute_load_ramps_wide(load_wide: pd.DataFrame) -> pd.DataFrame:
-    out = load_wide[["date"]].copy()
-    for h in range(1, 25):
-        if h > 1:
-            out[f"load_ramp_1h_h{h}"] = (
-                load_wide[f"load_h{h}"] - load_wide[f"load_h{h - 1}"]
-            )
-        else:
-            out[f"load_ramp_1h_h{h}"] = np.nan
-        if h > 3:
-            out[f"load_ramp_3h_h{h}"] = (
-                load_wide[f"load_h{h}"] - load_wide[f"load_h{h - 3}"]
-            )
-        else:
-            out[f"load_ramp_3h_h{h}"] = np.nan
-    return out
+def _build_calendar_scalar_pool(cache_dir: Path | None) -> pd.DataFrame:
+    return _empty_daily([])
 
 
-def _build_load_ramps_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_pjm_supply_demand_coalesced(cache_dir=cache_dir, region=RTO)
-    load = _hourly_value_profile(df, "load_mw", output_prefix="load")
-    return _compute_load_ramps_wide(load)
-
-
-def _build_load_ramps_profile_query(
+def _build_calendar_scalar_query(
     target_date: date, cache_dir: Path | None
 ) -> pd.DataFrame:
-    df = loader.load_load_forecast(cache_dir=cache_dir)
-    df = df[df["region"].astype(str) == RTO].copy()
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    load = _hourly_load_profile(df, "forecast_load_mw")
-    return _compute_load_ramps_wide(load)
+    return pd.DataFrame([{"date": target_date}])
 
 
-LOAD_RAMPS_PROFILE = FeatureDomain(
-    name="load_ramps_profile",
-    description=(
-        "Derived intra-day load ramps — load_ramp_1h_h{HE} = load_h{HE} - "
-        "load_h{HE-1}, load_ramp_3h_h{HE} = load_h{HE} - load_h{HE-3}. "
-        "Both ramps share a single ``load_ramps`` feature group (sunny "
-        "parity — sunny's load_ramps_scalar combines load_ramp_1h_at_hour "
-        "and load_ramp_3h_at_hour into one per-group distance). HE=1 1h "
-        "ramp and HE<=3 3h ramp are NaN (no in-day predecessor)."
-    ),
-    feature_groups={
-        "load_ramps": [LOAD_RAMP_1H_AT_HOUR_COL, LOAD_RAMP_3H_AT_HOUR_COL],
-    },
-    feature_group_weights={
-        "load_ramps": 1.5,
-    },
-    pool_builder=_build_load_ramps_profile_pool,
-    query_builder=_build_load_ramps_profile_query,
+CALENDAR_SCALAR = FeatureDomain(
+    name="calendar_scalar",
+    description="Calendar features (is_weekend, dow_sin, dow_cos) as distance group. Cols come from _shared._attach_calendar.",
+    feature_groups={"calendar": ["is_weekend", "dow_sin", "dow_cos"]},
+    feature_group_weights={"calendar": 1.0},
+    pool_builder=_build_calendar_scalar_pool,
+    query_builder=_build_calendar_scalar_query,
 )
 
 
-# ── temperature_profile (windowed) ───────────────────────────────────────
-# RTO-wide hourly temperature from ``load_weather_coalesced`` (observed
-# wins for dates with all 24 HEs present; forecast fills the rest,
-# including the future target date). Mirrors sunny's weather_at_hour but
-# at the wide-format level.
+# ── Registry ───────────────────────────────────────────────────────────
 
-
-def _build_temperature_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_weather_coalesced(cache_dir=cache_dir)
-    return _hourly_value_profile(df, "temp", output_prefix="temp")
-
-
-def _build_temperature_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    df = loader.load_weather_coalesced(cache_dir=cache_dir).copy()
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    return _hourly_value_profile(df, "temp", output_prefix="temp")
-
-
-TEMPERATURE_PROFILE = FeatureDomain(
-    name="temperature_profile",
-    description=(
-        "RTO-wide hourly temperature — 24 cols (temp_h1..temp_h24). "
-        "Sourced from load_weather_coalesced (observed-first, forecast "
-        "fallback) so historical pool uses observed actuals and the "
-        "query for a future date uses the forecast vintage."
-    ),
-    feature_groups={"temp_level": [TEMP_AT_HOUR_COL]},
-    feature_group_weights={"temp_level": 2.0},
-    pool_builder=_build_temperature_profile_pool,
-    query_builder=_build_temperature_profile_query,
-)
-
-
-# ── calendar_level (broadcast, derived from date) ────────────────────────
-# Soft DOW similarity in the distance metric — pairs with
-# FILTER_SAME_DOW_GROUP=False to keep day-of-week signal in the model
-# without hard filtering. Mirrors sunny's calendar group.
-
-
-def _calendar_features_from_date(d: date) -> dict[str, float]:
-    weekday_mon0 = d.weekday()  # Mon=0..Sun=6 (Python)
-    dow_num = (weekday_mon0 + 1) % 7  # Sun=0..Sat=6 (PJM/sunny convention)
-    return {
-        "dow_sin": float(math.sin(2 * math.pi * dow_num / 7.0)),
-        "dow_cos": float(math.cos(2 * math.pi * dow_num / 7.0)),
-        "is_weekend": 1.0 if dow_num in (0, 6) else 0.0,
-    }
-
-
-def _build_calendar_level_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_pjm_dates_daily(cache_dir=cache_dir)
-    if df is None or len(df) == 0 or "date" not in df.columns:
-        return pd.DataFrame(columns=["date"] + CALENDAR_LEVEL_COLS)
-    work = df[["date"]].copy()
-    work["date"] = _to_date(work["date"])
-    work = work.dropna(subset=["date"]).drop_duplicates("date").reset_index(drop=True)
-    feats = pd.DataFrame(
-        [_calendar_features_from_date(d) for d in work["date"]],
-        columns=CALENDAR_LEVEL_COLS,
-    )
-    return pd.concat([work, feats], axis=1)[["date"] + CALENDAR_LEVEL_COLS]
-
-
-def _build_calendar_level_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    feats = _calendar_features_from_date(target_date)
-    return pd.DataFrame([{"date": target_date, **feats}])[
-        ["date"] + CALENDAR_LEVEL_COLS
-    ]
-
-
-CALENDAR_LEVEL = FeatureDomain(
-    name="calendar_level",
-    description=(
-        "Calendar features (dow_sin, dow_cos, is_weekend) derived from the "
-        "date. Broadcast across HEs (single value per date). Soft DOW "
-        "similarity in the distance metric — pairs with "
-        "FILTER_SAME_DOW_GROUP=False default to keep day-of-week signal "
-        "without hard filtering."
-    ),
-    feature_groups={"calendar_level": CALENDAR_LEVEL_COLS},
-    feature_group_weights={"calendar_level": 1.0},
-    pool_builder=_build_calendar_level_pool,
-    query_builder=_build_calendar_level_query,
-)
-
-
-# ── Meteologica-fed sibling domains ──────────────────────────────────────
-# Mirror the PJM-fed supply/demand domains above but read from
-# ``load_meteologica_supply_demand_coalesced`` (Meteologica forecast →
-# PJM RT fallback). Single source decision per (region, date) for all
-# four series, so the identity ``net_load = load - solar - wind`` holds
-# within each pool row by construction. Region scope held to RTO for
-# parity with the PJM variant; Meteologica also publishes sub-zones.
-
-
-def _build_meteo_rto_load_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_meteologica_supply_demand_coalesced(cache_dir=cache_dir)
-    df = df[df["region"].astype(str) == RTO]
-    return _hourly_value_profile(df, "load_mw", output_prefix="load")
-
-
-def _build_meteo_rto_load_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    df = loader.load_meteologica_load_forecast(cache_dir=cache_dir).copy()
-    df = df[df["region"].astype(str) == RTO]
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    df = _select_query_vintage(df)
-    return _hourly_load_profile(df, "forecast_load_mw")
-
-
-METEO_RTO_LOAD_PROFILE = FeatureDomain(
-    name="meteo_rto_load_profile",
-    description=(
-        "Meteologica RTO load — 24 hourly cols (load_h1..load_h24) as a "
-        "single ``load_level`` group. Pool from "
-        "``load_meteologica_supply_demand_coalesced`` (Meteologica forecast → "
-        "PJM RT fallback); query from the DA-cutoff Meteologica load forecast."
-    ),
-    feature_groups={
-        "load_level": [LOAD_AT_HOUR_COL],
-    },
-    feature_group_weights={
-        "load_level": 3,
-    },
-    pool_builder=_build_meteo_rto_load_profile_pool,
-    query_builder=_build_meteo_rto_load_profile_query,
-)
-
-
-def _build_meteo_solar_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_meteologica_supply_demand_coalesced(cache_dir=cache_dir)
-    df = df[df["region"].astype(str) == RTO]
-    return _hourly_value_profile(df, "solar_mw", output_prefix="solar")
-
-
-def _build_meteo_solar_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    df = loader.load_meteologica_solar_forecast(cache_dir=cache_dir).copy()
-    df = df[df["region"].astype(str) == RTO]
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    df = _select_query_vintage(df)
-    return _hourly_value_profile(df, "solar_forecast", output_prefix="solar")
-
-
-METEO_SOLAR_PROFILE = FeatureDomain(
-    name="meteo_solar_profile",
-    description="Meteologica solar — scalar ``solar_at_hour`` per (date, HE) row.",
-    feature_groups={"solar_level": [SOLAR_AT_HOUR_COL]},
-    feature_group_weights={"solar_level": 1.5},
-    pool_builder=_build_meteo_solar_profile_pool,
-    query_builder=_build_meteo_solar_profile_query,
-)
-
-
-def _build_meteo_wind_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_meteologica_supply_demand_coalesced(cache_dir=cache_dir)
-    df = df[df["region"].astype(str) == RTO]
-    return _hourly_value_profile(df, "wind_mw", output_prefix="wind")
-
-
-def _build_meteo_wind_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    df = loader.load_meteologica_wind_forecast(cache_dir=cache_dir).copy()
-    df = df[df["region"].astype(str) == RTO]
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    df = _select_query_vintage(df)
-    return _hourly_value_profile(df, "wind_forecast", output_prefix="wind")
-
-
-METEO_WIND_PROFILE = FeatureDomain(
-    name="meteo_wind_profile",
-    description="Meteologica wind — scalar ``wind_at_hour`` per (date, HE) row.",
-    feature_groups={"wind_level": [WIND_AT_HOUR_COL]},
-    feature_group_weights={"wind_level": 1.5},
-    pool_builder=_build_meteo_wind_profile_pool,
-    query_builder=_build_meteo_wind_profile_query,
-)
-
-
-def _build_meteo_renewable_profile_pool(cache_dir: Path | None) -> pd.DataFrame:
-    df = loader.load_meteologica_supply_demand_coalesced(cache_dir=cache_dir)
-    df = df[df["region"].astype(str) == RTO]
-    solar_pool = _hourly_value_profile(df, "solar_mw", output_prefix="solar")
-    wind_pool = _hourly_value_profile(df, "wind_mw", output_prefix="wind")
-    return solar_pool.merge(wind_pool, on="date", how="outer")
-
-
-def _build_meteo_renewable_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    solar_q = _build_meteo_solar_profile_query(target_date, cache_dir)
-    wind_q = _build_meteo_wind_profile_query(target_date, cache_dir)
-    return solar_q.merge(wind_q, on="date", how="outer")
-
-
-METEO_RENEWABLE_PROFILE = FeatureDomain(
-    name="meteo_renewable_profile",
-    description=(
-        "Meteologica combined solar+wind — 48 hourly cols (solar_h1..solar_h24, "
-        "wind_h1..wind_h24) as a single ``renewable_level`` group. Mirrors "
-        "``renewable_profile`` but sourced from Meteologica forecasts with "
-        "PJM RT fallback."
-    ),
-    feature_groups={
-        "renewable_level": [SOLAR_AT_HOUR_COL, WIND_AT_HOUR_COL],
-    },
-    feature_group_weights={"renewable_level": 1.5},
-    pool_builder=_build_meteo_renewable_profile_pool,
-    query_builder=_build_meteo_renewable_profile_query,
-)
-
-
-def _build_meteo_rto_net_load_profile_pool(
-    cache_dir: Path | None,
-) -> pd.DataFrame:
-    df = loader.load_meteologica_supply_demand_coalesced(cache_dir=cache_dir)
-    df = df[df["region"].astype(str) == RTO]
-    return _hourly_value_profile(df, "net_load_mw", output_prefix="net_load")
-
-
-def _build_meteo_rto_net_load_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    df = loader.load_meteologica_net_load_forecast(cache_dir=cache_dir).copy()
-    df = df[df["region"].astype(str) == RTO]
-    df["date"] = _to_date(df["date"])
-    df = df[df["date"] == target_date]
-    df = _select_query_vintage(df)
-    return _hourly_value_profile(df, "net_load_forecast_mw", output_prefix="net_load")
-
-
-METEO_RTO_NET_LOAD_PROFILE = FeatureDomain(
-    name="meteo_rto_net_load_profile",
-    description=(
-        "Meteologica RTO net load (load - solar - wind) — 24 hourly cols "
-        "(net_load_h1..net_load_h24) as a single ``net_load_level`` group. "
-        "Pool from ``load_meteologica_supply_demand_coalesced``; query from "
-        "the DA-cutoff Meteologica net-load forecast (lead_days=1)."
-    ),
-    feature_groups={
-        "net_load_level": [NET_LOAD_AT_HOUR_COL],
-    },
-    feature_group_weights={
-        "net_load_level": 2,
-    },
-    pool_builder=_build_meteo_rto_net_load_profile_pool,
-    query_builder=_build_meteo_rto_net_load_profile_query,
-)
-
-
-def _build_meteo_load_ramps_profile_pool(
-    cache_dir: Path | None,
-) -> pd.DataFrame:
-    df = loader.load_meteologica_supply_demand_coalesced(cache_dir=cache_dir)
-    df = df[df["region"].astype(str) == RTO]
-    load = _hourly_value_profile(df, "load_mw", output_prefix="load")
-    return _compute_load_ramps_wide(load)
-
-
-def _build_meteo_load_ramps_profile_query(
-    target_date: date, cache_dir: Path | None
-) -> pd.DataFrame:
-    load = _build_meteo_rto_load_profile_query(target_date, cache_dir)
-    return _compute_load_ramps_wide(load)
-
-
-METEO_LOAD_RAMPS_PROFILE = FeatureDomain(
-    name="meteo_load_ramps_profile",
-    description=(
-        "Derived intra-day load ramps (Meteologica) — load_ramp_1h_h{HE} = "
-        "load_h{HE} - load_h{HE-1}, load_ramp_3h_h{HE} = load_h{HE} - "
-        "load_h{HE-3}. Both ramps share a single ``load_ramps`` feature "
-        "group. HE=1 1h ramp and HE<=3 3h ramp are NaN (no in-day "
-        "predecessor)."
-    ),
-    feature_groups={
-        "load_ramps": [LOAD_RAMP_1H_AT_HOUR_COL, LOAD_RAMP_3H_AT_HOUR_COL],
-    },
-    feature_group_weights={
-        "load_ramps": 1.5,
-    },
-    pool_builder=_build_meteo_load_ramps_profile_pool,
-    query_builder=_build_meteo_load_ramps_profile_query,
-)
-
-
-# ── Registry ─────────────────────────────────────────────────────────────
 
 DOMAIN_REGISTRY: dict[str, FeatureDomain] = {
-    RTO_LOAD_PROFILE.name: RTO_LOAD_PROFILE,
-    LOAD_RAMPS_PROFILE.name: LOAD_RAMPS_PROFILE,
-    SOLAR_PROFILE.name: SOLAR_PROFILE,
-    WIND_PROFILE.name: WIND_PROFILE,
-    RENEWABLE_PROFILE.name: RENEWABLE_PROFILE,
-    RTO_NET_LOAD_PROFILE.name: RTO_NET_LOAD_PROFILE,
-    TEMPERATURE_PROFILE.name: TEMPERATURE_PROFILE,
-    OUTAGES_LEVEL.name: OUTAGES_LEVEL,
-    GAS_LEVEL.name: GAS_LEVEL,
-    CALENDAR_LEVEL.name: CALENDAR_LEVEL,
-    METEO_RTO_LOAD_PROFILE.name: METEO_RTO_LOAD_PROFILE,
-    METEO_LOAD_RAMPS_PROFILE.name: METEO_LOAD_RAMPS_PROFILE,
-    METEO_SOLAR_PROFILE.name: METEO_SOLAR_PROFILE,
-    METEO_WIND_PROFILE.name: METEO_WIND_PROFILE,
-    METEO_RENEWABLE_PROFILE.name: METEO_RENEWABLE_PROFILE,
-    METEO_RTO_NET_LOAD_PROFILE.name: METEO_RTO_NET_LOAD_PROFILE,
+    RTO_LOAD_SCALAR.name: RTO_LOAD_SCALAR,
+    TEMPERATURE_SCALAR.name: TEMPERATURE_SCALAR,
+    SOLAR_SCALAR.name: SOLAR_SCALAR,
+    WIND_SCALAR.name: WIND_SCALAR,
+    RENEWABLE_AT_HOUR_SCALAR.name: RENEWABLE_AT_HOUR_SCALAR,
+    LOAD_RAMPS_SCALAR.name: LOAD_RAMPS_SCALAR,
+    RTO_NET_LOAD_SCALAR.name: RTO_NET_LOAD_SCALAR,
+    OUTAGES_SCALAR.name: OUTAGES_SCALAR,
+    GAS_SCALAR.name: GAS_SCALAR,
+    CALENDAR_SCALAR.name: CALENDAR_SCALAR,
 }
+
+
+# Daily-broadcast domains have no hour_ending column in their output;
+# _shared.py uses this set to decide how to merge the domain's frame.
+# CALENDAR_SCALAR is daily-broadcast: its (no-op) builders return only
+# date-keyed frames; the actual cols are filled by _shared._attach_calendar.
+DAILY_BROADCAST_DOMAINS: frozenset[str] = frozenset(
+    {OUTAGES_SCALAR.name, GAS_SCALAR.name, CALENDAR_SCALAR.name}
+)
 
 
 def resolved_feature_groups(domain_names: tuple[str, ...]) -> dict[str, list[str]]:
@@ -921,7 +868,6 @@ def resolved_feature_groups(domain_names: tuple[str, ...]) -> dict[str, list[str
 def resolved_raw_feature_group_weights(
     domain_names: tuple[str, ...],
 ) -> dict[str, float]:
-    """Sum each domain's group weights without renormalization."""
     raw: dict[str, float] = {}
     for n in domain_names:
         raw.update(DOMAIN_REGISTRY[n].feature_group_weights)
@@ -929,12 +875,20 @@ def resolved_raw_feature_group_weights(
 
 
 def resolved_feature_group_weights(domain_names: tuple[str, ...]) -> dict[str, float]:
-    """Sum each domain's group weights, then renormalize so total = 1.0."""
     raw = resolved_raw_feature_group_weights(domain_names)
     total = sum(raw.values())
     if total <= 0:
         return raw
     return {k: v / total for k, v in raw.items()}
+
+
+def all_feature_cols(domain_names: tuple[str, ...]) -> list[str]:
+    seen: list[str] = []
+    for n in domain_names:
+        for c in DOMAIN_REGISTRY[n].feature_cols:
+            if c not in seen:
+                seen.append(c)
+    return seen
 
 
 def feature_group_weight_locations() -> dict[str, tuple[str, int]]:
@@ -965,12 +919,3 @@ def feature_group_weight_locations() -> dict[str, tuple[str, int]]:
                 if isinstance(k, _ast.Constant) and isinstance(k.value, str):
                     out[k.value] = (src_file, k.lineno)
     return out
-
-
-def all_feature_cols(domain_names: tuple[str, ...]) -> list[str]:
-    seen: list[str] = []
-    for n in domain_names:
-        for c in DOMAIN_REGISTRY[n].feature_cols:
-            if c not in seen:
-                seen.append(c)
-    return seen

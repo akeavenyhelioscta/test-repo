@@ -1,23 +1,16 @@
-"""Shared parquet loading + pool/query assembly for the three model builders.
+"""Long-format pool + query assembly for like_day_model_knn.
 
-After the T4 wide→long cutover, ``build_pool_from_spec`` returns a long
-DataFrame (one row per (date, hour_ending), 1 scalar value per feature)
-and ``build_query_row_from_spec`` returns a 24-row DataFrame for the
-target date. Domain pool builders still produce wide format internally
-(``{stem}_h1..{stem}_h24`` cols) — the melt step in
-``_melt_pool_to_long`` converts to long with sunny-compatible col names
-(``load_mw_at_hour``, ``temp_at_hour``, etc.). Spec ``feature_groups``
-reference the long col names.
-
-The per-model builder modules are thin wrappers around
-``build_pool_from_spec`` / ``build_query_row_from_spec``; the spec's
-``domains`` field drives which features are pulled in and joined.
+Sunny's variant uses one row per ``(date, hour_ending)`` (vs. the
+sibling's wide ``(date, lmp_h1..lmp_h24)`` shape). Hourly domains are
+outer-joined on ``(date, hour_ending)``; daily-broadcast domains are
+outer-joined on ``date`` so pandas naturally fans the daily value across
+all 24 HE rows. Calendar features and a single ``lmp`` label are merged
+last.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from datetime import date
 from pathlib import Path
 
@@ -25,241 +18,129 @@ import numpy as np
 import pandas as pd
 
 from backend.modelling.da_models.common.data import loader
-from backend.modelling.da_models.common.data.loader import _resolve_cache_dir
-from backend.modelling.da_models.common.data.lmp_pool import (
-    LMP_HOUR_COLUMNS,
-    build_lmp_labels,
-    load_lmp_da,
-)
+from backend.modelling.da_models.common.data.lmp_pool import build_lmp_labels, load_lmp_da
+from backend.modelling.da_models.like_day_model_knn import calendar as _calendar
 from backend.modelling.da_models.like_day_model_knn import configs
 from backend.modelling.da_models.like_day_model_knn.domains import (
+    DAILY_BROADCAST_DOMAINS,
     DOMAIN_REGISTRY,
-    HOURLY_STEM_TO_LONG_COL,
     all_feature_cols,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# Pattern to detect wide hourly cols of the form ``{stem}_h{N}`` where
-# N is in 1..24. Used by ``_melt_pool_to_long`` to identify which cols
-# need pivoting from wide to long.
-_HOURLY_COL_PATTERN = re.compile(r"^(.+)_h(\d+)$")
+CALENDAR_COLS: list[str] = [
+    "day_of_week_number",
+    "is_nerc_holiday",
+    "is_weekend",
+    "dow_sin",
+    "dow_cos",
+]
 
 
-def resolved_load_forecast_paths(cache_dir: Path | None) -> list[Path]:
-    """Absolute paths of the load-forecast parquets that exist on disk."""
-    resolved = _resolve_cache_dir(cache_dir)
-    return [
-        resolved / name
-        for name in configs.LOAD_FORECAST_PARQUETS
-        if (resolved / name).exists()
-    ]
+def _to_date(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s).dt.date
 
 
-def load_pjm_load_forecast(cache_dir: Path | None) -> pd.DataFrame:
-    """Load PJM load-forecast features from the historical-backfill parquet."""
-    paths = resolved_load_forecast_paths(cache_dir)
-    if not paths:
-        logger.warning(
-            "No load-forecast parquets found at %s (looked for %s) - "
-            "falling back to default loader search",
-            _resolve_cache_dir(cache_dir),
-            configs.LOAD_FORECAST_PARQUETS,
-        )
-        return loader.load_load_forecast(cache_dir=cache_dir)
-
-    parts: list[pd.DataFrame] = []
-    for p in paths:
-        parts.append(loader.load_load_forecast(path=p))
-        logger.info("Loaded PJM load forecast: %s", p.name)
-
-    df = pd.concat(parts, ignore_index=True)
-    df = df.drop_duplicates(subset=["date", "hour_ending", "region"], keep="first")
-    df = df.sort_values(["region", "date", "hour_ending"]).reset_index(drop=True)
-    return df
-
-
-def filter_to_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
-    """Restrict a hourly load forecast frame to a specific PJM region (e.g. RTO).
-
-    Assumes canonical dtypes from ``loader._normalize_load_forecast``.
-    """
-    if df is None or len(df) == 0:
-        return pd.DataFrame()
-    if "region" in df.columns:
-        return df[df["region"] == region].copy()
-    return df.copy()
-
-
-def ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    """Add NaN columns for any names missing from the frame, preserving order."""
-    out = df.copy()
-    missing = [c for c in columns if c not in out.columns]
-    if missing:
-        nan_df = pd.DataFrame({c: np.nan for c in missing}, index=out.index)
-        out = pd.concat([out, nan_df], axis=1)
-    return out
-
-
-def load_dates_daily(cache_dir: Path | None) -> pd.DataFrame:
-    """Calendar metadata frame from ``pjm_dates_daily.parquet``.
-
-    Thin wrapper around ``calendar.load_pjm_dates_daily`` so per-model
-    forecast/single_day modules don't need to import the calendar module
-    directly; they already import ``_shared``.
-    """
-    from backend.modelling.da_models.like_day_model_knn import calendar as _calendar
-
-    return _calendar.load_pjm_dates_daily(cache_dir=cache_dir)
-
-
-def load_hourly_rto(cache_dir: Path | None) -> pd.DataFrame:
-    """PJM RTO hourly load forecast, region-filtered.
-
-    Types are already canonical from ``loader._normalize_load_forecast`` -
-    no re-coercion needed here.
-    """
-    df = load_pjm_load_forecast(cache_dir=cache_dir)
-    if "region" in df.columns:
-        df = df[df["region"] == configs.LOAD_REGION].copy()
-    return df
-
-
-# ── Spec-driven pool/query assembly ─────────────────────────────────────
-
-
-def _build_system_energy_labels(df_sep: pd.DataFrame, hub: str) -> pd.DataFrame:
-    """Wide-format LMP labels from PJM DA system energy price data.
-
-    Parallel to ``build_lmp_labels`` but sourced from
-    ``loader.load_lmp_system_energy_da``. SEP is system-wide so all hubs
-    return the same series for a given (date, HE); the hub filter
-    deduplicates the per-hub rows in the parquet rather than narrowing
-    geographically. Output columns: ``date``, ``lmp_h1..lmp_h24``.
-    """
-    if df_sep is None or len(df_sep) == 0:
-        return pd.DataFrame(columns=["date"] + LMP_HOUR_COLUMNS)
-    df = df_sep[df_sep["region"].astype(str) == hub].copy()
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-    df["hour_ending"] = pd.to_numeric(df["hour_ending"], errors="coerce").astype(
-        "Int64"
+def _attach_calendar(
+    pool: pd.DataFrame,
+    cache_dir: Path | None,
+) -> pd.DataFrame:
+    dates = pd.Series(pool["date"].drop_duplicates().tolist(), name="date").reset_index(
+        drop=True
     )
-    df["lmp_system_energy_price"] = pd.to_numeric(
-        df["lmp_system_energy_price"], errors="coerce"
-    )
-    df = df.dropna(subset=["date", "hour_ending", "lmp_system_energy_price"])
-    if len(df) == 0:
-        return pd.DataFrame(columns=["date"] + LMP_HOUR_COLUMNS)
-    df["hour_ending"] = df["hour_ending"].astype(int)
-    pivot = df.pivot_table(
-        index="date",
-        columns="hour_ending",
-        values="lmp_system_energy_price",
-        aggfunc="mean",
-    ).reindex(columns=range(1, 25))
-    pivot = pivot.rename(columns={h: f"lmp_h{h}" for h in range(1, 25)})
-    return pivot.reset_index()
+    if len(dates) == 0:
+        for c in CALENDAR_COLS:
+            pool[c] = pd.Series(dtype=float)
+        return pool
 
-
-def _melt_pool_to_long(wide_pool: pd.DataFrame) -> pd.DataFrame:
-    """Convert wide pool (24 hourly cols per stem) to long ((date, HE) rows).
-
-    For each ``{stem}_h{N}`` family of cols (N in 1..24), the 24 cols
-    are unpivoted into a single scalar col named per
-    ``HOURLY_STEM_TO_LONG_COL`` (e.g. ``load_h*`` → ``load_mw_at_hour``,
-    ``lmp_h*`` → ``lmp``). Stems not in the mapping are skipped with a
-    warning. Daily/broadcast cols (no ``_h{N}`` suffix) are joined on
-    ``date``, replicated across all 24 HE rows of each date.
-
-    Output schema: ``date``, ``hour_ending``, plus one scalar col per
-    melted stem and the broadcast cols.
-    """
-    if wide_pool is None or len(wide_pool) == 0:
-        return pd.DataFrame(columns=["date", "hour_ending"])
-    if "date" not in wide_pool.columns:
-        raise ValueError("_melt_pool_to_long: wide_pool missing 'date' column")
-
-    # Group cols by stem.
-    stems: dict[str, list[tuple[str, int]]] = {}  # stem -> [(col, he), ...]
-    broadcast_cols: list[str] = []
-    for col in wide_pool.columns:
-        if col == "date":
-            continue
-        m = _HOURLY_COL_PATTERN.match(col)
-        if m and 1 <= int(m.group(2)) <= 24:
-            stem = m.group(1)
-            he = int(m.group(2))
-            stems.setdefault(stem, []).append((col, he))
-        else:
-            broadcast_cols.append(col)
-
-    long_parts: list[pd.DataFrame] = []
-    for stem, col_he_pairs in stems.items():
-        long_col = HOURLY_STEM_TO_LONG_COL.get(stem)
-        if long_col is None:
-            logger.warning(
-                "_melt_pool_to_long: unknown stem %r (cols=%s) — skipping",
-                stem,
-                [c for c, _ in col_he_pairs],
+    dates_meta = _calendar.load_pjm_dates_daily(cache_dir=cache_dir)
+    holiday_lookup: dict = {}
+    if (
+        dates_meta is not None
+        and len(dates_meta) > 0
+        and "is_nerc_holiday" in dates_meta.columns
+    ):
+        meta = dates_meta[["date", "is_nerc_holiday"]].copy()
+        meta["date"] = _to_date(meta["date"])
+        holiday_lookup = dict(
+            zip(
+                meta["date"].tolist(),
+                meta["is_nerc_holiday"].fillna(0).astype(int).tolist(),
             )
-            continue
-        # Sort by HE so the melt produces a stable order (1..24).
-        col_he_pairs.sort(key=lambda t: t[1])
-        cols = [c for c, _ in col_he_pairs]
-        sub = wide_pool[["date"] + cols].melt(
-            id_vars="date",
-            value_vars=cols,
-            var_name="_he_col",
-            value_name=long_col,
         )
-        # Extract HE number from col name.
-        sub["hour_ending"] = sub["_he_col"].apply(
-            lambda c: int(_HOURLY_COL_PATTERN.match(c).group(2))
+
+    rows: list[dict] = []
+    for d in dates.tolist():
+        is_hol = bool(holiday_lookup.get(d, 0))
+        row = {"date": d}
+        row.update(_calendar.compute_calendar_row(d, is_nerc_holiday=is_hol))
+        rows.append(row)
+    cal_df = pd.DataFrame(rows)
+    return pool.merge(cal_df, on="date", how="left")
+
+
+def _build_lmp_long(
+    cache_dir: Path | None,
+    hub: str,
+    label_source: str,
+) -> pd.DataFrame:
+    if label_source == "hub_lmp":
+        df_lmp = load_lmp_da(cache_dir=cache_dir)
+        labels_wide = build_lmp_labels(df_lmp, hub)
+        if len(labels_wide) == 0:
+            return pd.DataFrame(columns=["date", "hour_ending", "lmp"])
+        long = labels_wide.melt(
+            id_vars=["date"],
+            var_name="hour_ending",
+            value_name="lmp",
         )
-        sub = sub[["date", "hour_ending", long_col]]
-        long_parts.append(sub)
+        long["hour_ending"] = (
+            long["hour_ending"].str.replace("lmp_h", "", regex=False).astype(int)
+        )
+        long["date"] = _to_date(long["date"])
+        return long[["date", "hour_ending", "lmp"]].dropna(
+            subset=["date", "hour_ending"]
+        )
 
-    if not long_parts:
-        # No hourly stems found — return an empty long frame with broadcast.
-        skel = wide_pool[["date"]].copy()
-        skel["_he"] = [list(range(1, 25))] * len(skel)
-        skel = skel.explode("_he").rename(columns={"_he": "hour_ending"})
-        skel["hour_ending"] = skel["hour_ending"].astype(int)
-        long = skel
-    else:
-        long = long_parts[0]
-        for part in long_parts[1:]:
-            long = long.merge(part, on=["date", "hour_ending"], how="outer")
+    if label_source == "system_energy":
+        try:
+            df_sep = loader.load_lmp_system_energy_da(cache_dir=cache_dir)
+        except KeyError as exc:
+            raise KeyError(
+                "label_source='system_energy' requires lmp_system_energy_price in the LMP frame; "
+                "cache may be stale - re-ingest pjm_lmps_hourly.parquet."
+            ) from exc
+        if (
+            df_sep is None
+            or len(df_sep) == 0
+            or "lmp_system_energy_price" not in df_sep.columns
+        ):
+            raise KeyError(
+                "label_source='system_energy' requires lmp_system_energy_price in the LMP frame; "
+                "cache may be stale - re-ingest pjm_lmps_hourly.parquet."
+            )
+        sep = df_sep[df_sep["region"].astype(str) == hub].copy()
+        if len(sep) == 0:
+            sep = df_sep.copy()
+        sep["date"] = _to_date(sep["date"])
+        sep["hour_ending"] = pd.to_numeric(sep["hour_ending"], errors="coerce")
+        sep = sep.dropna(subset=["date", "hour_ending"]).copy()
+        sep["hour_ending"] = sep["hour_ending"].astype(int)
+        sep = sep.rename(columns={"lmp_system_energy_price": "lmp"})
+        sep = sep.drop_duplicates(subset=["date", "hour_ending"], keep="first")
+        return sep[["date", "hour_ending", "lmp"]]
 
-    # Broadcast cols — joined on date, replicated across HE rows.
-    if broadcast_cols:
-        long = long.merge(wide_pool[["date"] + broadcast_cols], on="date", how="left")
-
-    return long.sort_values(["date", "hour_ending"]).reset_index(drop=True)
+    raise ValueError(f"Unknown label_source: {label_source!r}")
 
 
 def build_pool_from_spec(
     spec: configs.ModelSpec,
     hub: str = configs.HUB,
-    cache_dir: Path | None = configs.CACHE_DIR,
     label_source: str = configs.LABEL_SOURCE,
+    cache_dir: Path | None = configs.CACHE_DIR,
 ) -> pd.DataFrame:
-    """Long-format pool: one row per (date, hour_ending) for every delivery
-    date in history, carrying scalar feature values for that HE plus the
-    LMP label and broadcast features (outage/gas/calendar).
-
-    Domains' wide pool builders are pulled per ``spec.domains``,
-    outer-joined on ``date``, then ``_melt_pool_to_long`` pivots the
-    ``{stem}_h1..h24`` cols into single scalar long cols matching
-    sunny's naming (``load_mw_at_hour``, ``temp_at_hour``, etc.).
-
-    ``label_source``:
-      - ``"hub_lmp"`` (default): total DA LMP at ``hub``.
-      - ``"system_energy"``: PJM RTO DA System Energy Price (LMP minus
-        congestion + loss). SEP is system-wide so the hub filter only
-        deduplicates per-hub rows.
-    """
     if not spec.domains:
         raise ValueError(f"Spec '{spec.name}' has no domains.")
 
@@ -267,52 +148,79 @@ def build_pool_from_spec(
     for name in spec.domains:
         domain = DOMAIN_REGISTRY[name]
         df = domain.pool_builder(cache_dir)
-        df["date"] = pd.to_datetime(df["date"]).dt.date
+        if df is None or len(df) == 0:
+            continue
+        df = df.copy()
+        df["date"] = _to_date(df["date"])
+        if name in DAILY_BROADCAST_DOMAINS:
+            on = ["date"]
+        else:
+            df["hour_ending"] = pd.to_numeric(
+                df["hour_ending"], errors="coerce"
+            ).astype("Int64")
+            df = df.dropna(subset=["date", "hour_ending"]).copy()
+            df["hour_ending"] = df["hour_ending"].astype(int)
+            on = ["date", "hour_ending"]
         if feat is None:
             feat = df
         else:
-            feat = feat.merge(df, on="date", how="outer")
+            if "hour_ending" in feat.columns and on == ["date"]:
+                feat = feat.merge(df, on=["date"], how="outer")
+            elif "hour_ending" not in feat.columns and on == ["date", "hour_ending"]:
+                feat = df.merge(feat, on=["date"], how="outer")
+            else:
+                feat = feat.merge(df, on=on, how="outer")
 
-    if label_source == "hub_lmp":
-        df_lmp_da = load_lmp_da(cache_dir=cache_dir)
-        df_labels = build_lmp_labels(df_lmp_da, hub)
-    elif label_source == "system_energy":
-        df_sep = loader.load_lmp_system_energy_da(cache_dir=cache_dir)
-        df_labels = _build_system_energy_labels(df_sep, hub)
-    else:
-        raise ValueError(
-            f"Unknown label_source={label_source!r}; "
-            "expected 'hub_lmp' or 'system_energy'."
+    if feat is None or len(feat) == 0:
+        feat = pd.DataFrame(
+            columns=["date", "hour_ending"] + all_feature_cols(spec.domains)
         )
-    wide_pool = (
-        feat.merge(df_labels, on="date", how="left")
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
 
-    long_pool = _melt_pool_to_long(wide_pool)
+    if "hour_ending" not in feat.columns:
+        hours = pd.DataFrame(
+            {
+                "hour_ending": list(configs.HOURS)
+                if hasattr(configs, "HOURS")
+                else list(range(1, 25))
+            }
+        )
+        feat["__key"] = 1
+        hours["__key"] = 1
+        feat = feat.merge(hours, on="__key").drop(columns=["__key"])
 
-    # Coverage telemetry.
-    n_dates = long_pool["date"].nunique() if "date" in long_pool.columns else 0
-    n_rows = len(long_pool)
-    feature_long_cols = [
-        c for c in long_pool.columns if c not in ("date", "hour_ending")
-    ]
-    n_feature_cols = len(feature_long_cols)
-    has_lmp = "lmp" in long_pool.columns
-    n_with_lmp = int(long_pool["lmp"].notna().sum()) if has_lmp else 0
+    feat = _attach_calendar(feat, cache_dir)
+
+    lmp_long = _build_lmp_long(cache_dir=cache_dir, hub=hub, label_source=label_source)
+    pool = feat.merge(lmp_long, on=["date", "hour_ending"], how="left")
+
+    feature_cols = all_feature_cols(spec.domains)
+    # Calendar cols may appear in both feature_cols (when calendar_scalar is in
+    # the spec) and CALENDAR_COLS (always attached for the filter ladder).
+    # Dedup preserves order from feature_cols.
+    extra_cal = [c for c in CALENDAR_COLS if c not in feature_cols]
+    keep_cols = ["date", "hour_ending"] + feature_cols + extra_cal + ["lmp"]
+    for c in keep_cols:
+        if c not in pool.columns:
+            pool[c] = np.nan
+    pool = pool.loc[:, ~pool.columns.duplicated()]
+    pool = pool[keep_cols]
+    pool = pool.sort_values(["date", "hour_ending"]).reset_index(drop=True)
+
+    n_rows = len(pool)
+    n_dates = pool["date"].nunique()
+    n_lmp = int(pool["lmp"].notna().sum())
+    fill = float(n_lmp / n_rows) if n_rows else 0.0
     logger.info(
-        "%s pool (long): %d rows / %d unique dates x %d feature cols "
-        "(%d rows w/ lmp) — domains=%s, label_source=%s",
+        "%s pool (long): %d rows over %d dates; lmp fill %d/%d (%.2f%%); domains=%s",
         spec.name,
         n_rows,
         n_dates,
-        n_feature_cols,
-        n_with_lmp,
+        n_lmp,
+        n_rows,
+        fill * 100.0,
         spec.domains,
-        label_source,
     )
-    return long_pool
+    return pool
 
 
 def build_query_row_from_spec(
@@ -320,57 +228,62 @@ def build_query_row_from_spec(
     target_date: date,
     cache_dir: Path | None = configs.CACHE_DIR,
 ) -> pd.DataFrame:
-    """Long-format query: 24-row DataFrame keyed by (date, hour_ending),
-    one row per HE, carrying scalar feature values for the target date.
-
-    Each domain's query builder returns a one-row wide frame for the
-    target date; the merged wide query is melted to long via
-    ``_melt_pool_to_long`` (no LMP since the query is unrealized).
-    """
     if not spec.domains:
         raise ValueError(f"Spec '{spec.name}' has no domains.")
 
-    parts: list[pd.DataFrame] = []
+    HOURS = list(range(1, 25))
+    base = pd.DataFrame({"date": [target_date] * 24, "hour_ending": HOURS})
+
     for name in spec.domains:
         domain = DOMAIN_REGISTRY[name]
         df = domain.query_builder(target_date, cache_dir)
-        if len(df) == 0:
-            empty = {"date": target_date, **{c: np.nan for c in domain.feature_cols}}
-            df = pd.DataFrame([empty])
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        df = df[df["date"] == target_date]
-        if len(df) == 0:
-            empty = {"date": target_date, **{c: np.nan for c in domain.feature_cols}}
-            df = pd.DataFrame([empty])
-        parts.append(df.iloc[[0]].reset_index(drop=True))
+        if df is None or len(df) == 0:
+            for c in domain.feature_cols:
+                if c not in base.columns:
+                    base[c] = np.nan
+            continue
+        df = df.copy()
+        df["date"] = _to_date(df["date"])
+        if name in DAILY_BROADCAST_DOMAINS:
+            df = df[df["date"] == target_date]
+            if len(df) == 0:
+                for c in domain.feature_cols:
+                    if c not in base.columns:
+                        base[c] = np.nan
+                continue
+            for c in domain.feature_cols:
+                base[c] = df.iloc[0].get(c, np.nan)
+        else:
+            df["hour_ending"] = pd.to_numeric(
+                df["hour_ending"], errors="coerce"
+            ).astype("Int64")
+            df = df.dropna(subset=["date", "hour_ending"]).copy()
+            df["hour_ending"] = df["hour_ending"].astype(int)
+            df = df[df["date"] == target_date]
+            keep = ["date", "hour_ending"] + [
+                c for c in domain.feature_cols if c in df.columns
+            ]
+            base = base.merge(df[keep], on=["date", "hour_ending"], how="left")
+            for c in domain.feature_cols:
+                if c not in base.columns:
+                    base[c] = np.nan
 
-    wide = parts[0]
-    for p in parts[1:]:
-        wide = wide.merge(p, on="date", how="left")
+    dates_meta = _calendar.load_pjm_dates_daily(cache_dir=cache_dir)
+    is_hol = False
+    if dates_meta is not None and len(dates_meta) > 0:
+        sub = dates_meta[dates_meta["date"] == target_date]
+        if len(sub) > 0 and "is_nerc_holiday" in sub.columns:
+            is_hol = bool(sub.iloc[0].get("is_nerc_holiday", 0))
+    cal = _calendar.compute_calendar_row(target_date, is_nerc_holiday=is_hol)
+    for k, v in cal.items():
+        base[k] = v
 
-    long = _melt_pool_to_long(wide)
-    n_filled = int(
-        long.drop(columns=["date", "hour_ending"], errors="ignore")
-        .notna()
-        .any(axis=1)
-        .sum()
-    )
-    logger.info(
-        "%s query for %s: %d/24 HE rows w/ any feature — domains=%s",
-        spec.name,
-        target_date,
-        n_filled,
-        spec.domains,
-    )
-    return long
-
-
-# ── Legacy compat ──────────────────────────────────────────────────────
-#
-# Some upstream callers still reference ``all_feature_cols`` (the wide
-# convention's catalog of every feature col across enabled domains).
-# Keep the import alive so those callers don't ImportError; the symbol
-# now returns long-format col names per domain.feature_groups.
-
-
-_ = all_feature_cols  # re-export for callers that haven't migrated yet
+    feature_cols = all_feature_cols(spec.domains)
+    extra_cal = [c for c in CALENDAR_COLS if c not in feature_cols]
+    keep_cols = ["date", "hour_ending"] + feature_cols + extra_cal
+    for c in keep_cols:
+        if c not in base.columns:
+            base[c] = np.nan
+    base = base.loc[:, ~base.columns.duplicated()]
+    out = base[keep_cols].sort_values("hour_ending").reset_index(drop=True)
+    return out

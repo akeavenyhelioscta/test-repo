@@ -12,6 +12,7 @@ contract and how to run a preflight.
 from backend.modelling.da_models.common.validation.checks import (
     CheckResult,
     CheckStatus,
+    check_forecast_execution_recent,
     check_freshness,
     check_frame_non_empty,
     check_lead_days,
@@ -33,6 +34,7 @@ __all__ = [
     "CheckStatus",
     "DataValidationError",
     "ValidationReport",
+    "check_forecast_execution_recent",
     "check_freshness",
     "check_frame_non_empty",
     "check_lead_days",

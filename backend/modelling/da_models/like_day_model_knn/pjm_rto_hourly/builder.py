@@ -1,9 +1,7 @@
-"""Pool and query builder for pjm_rto_hourly (thin wrapper).
+"""Pool and query builder for pjm_rto_hourly — thin wrapper.
 
-Delegates to ``_shared.build_pool_from_spec`` / ``build_query_row_from_spec``.
-The engine consumes per-HE feature columns (load_h*, solar_h*, wind_h*)
-through a 3-hour window per target HE; daily-broadcast groups (outage_*,
-gas_*) ride along through the engine's broadcast distance path.
+Delegates to ``_shared.build_pool_from_spec`` / ``build_query_row_from_spec``
+which produce long-format ``(date, hour_ending, ...)`` frames.
 """
 
 from __future__ import annotations
@@ -19,16 +17,16 @@ from backend.modelling.da_models.like_day_model_knn import _shared, configs
 def build_pool(
     schema: str = configs.SCHEMA,
     hub: str = configs.HUB,
+    label_source: str = configs.LABEL_SOURCE,
     cache_dir: Path | None = configs.CACHE_DIR,
     spec: configs.ModelSpec = configs.PJM_RTO_HOURLY_SPEC,
-    label_source: str = configs.LABEL_SOURCE,
 ) -> pd.DataFrame:
     _ = schema
     return _shared.build_pool_from_spec(
         spec=spec,
         hub=hub,
-        cache_dir=cache_dir,
         label_source=label_source,
+        cache_dir=cache_dir,
     )
 
 
@@ -37,7 +35,7 @@ def build_query_row(
     schema: str = configs.SCHEMA,
     cache_dir: Path | None = configs.CACHE_DIR,
     spec: configs.ModelSpec = configs.PJM_RTO_HOURLY_SPEC,
-) -> pd.Series:
+) -> pd.DataFrame:
     _ = schema
     return _shared.build_query_row_from_spec(
         spec=spec,

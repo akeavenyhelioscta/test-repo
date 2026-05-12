@@ -1,11 +1,14 @@
-"""Next-N-days Meteologica DA-price baseline -- horizon summary + multi-day upsert.
+"""Next-14-days Meteologica DA-price baseline -- horizon summary + multi-day upsert.
 
 Loads the most-recent Meteologica DA-price vintage (which covers ~7-14 future
-delivery days), computes the OnPeak HE8-23 forecast for each forward delivery
-date, prints a one-row-per-day summary, and -- by default -- upserts one row
-per delivery date into ``pjm_model_outputs.forecast_runs``: all rows share one
-``run_id``, with ``run_date`` = the vintage and ``target_date`` = each delivery
-date, so each payload's ``lead_days`` = ``target_date - run_date`` (1..N).
+delivery days with full 24-hour coverage), computes the OnPeak HE8-23 forecast
+for each forward delivery date, prints a one-row-per-day summary, and -- by
+default -- upserts one row per delivery date into
+``pjm_model_outputs.forecast_runs``: all rows share one ``run_id``, with
+``run_date`` = the vintage and ``target_date`` = each delivery date, so each
+payload's ``lead_days`` = ``target_date - run_date`` (1..14). ``HORIZON_DAYS``
+caps the count; the vintage's own coverage is the real ceiling, so on a short
+vintage day this publishes fewer than 14 forward dates.
 
 Sibling of ``forecast_single_day.py`` (which publishes just tomorrow / lead 1
 and keeps the rich per-hour detail tables); both publish
@@ -21,8 +24,8 @@ pipeline (a backfill mode that fills actuals for past target dates is a follow-u
 
 Usage::
 
-    python -m backend.modelling.da_models.baseline_meteo_da_price.pipelines.forecast_next_7_days
-    python modelling/da_models/baseline_meteo_da_price/pipelines/forecast_next_7_days.py
+    python -m backend.modelling.da_models.baseline_meteo_da_price.pipelines.forecast_next_14_days
+    python modelling/da_models/baseline_meteo_da_price/pipelines/forecast_next_14_days.py
 """
 
 from __future__ import annotations
@@ -38,7 +41,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
-from backend.modelling.da_models.baseline_meteo_da_price.printers import build_bands_table  # noqa: E402
+from backend.modelling.da_models.baseline_meteo_da_price.printers import (  # noqa: E402
+    build_bands_table,
+)
 from backend.modelling.da_models.common.data import loader  # noqa: E402
 from backend.modelling.da_models.common.publish import publish_forecast_run  # noqa: E402
 from backend.utils.logging_utils import init_logging, print_divider, print_header  # noqa: E402
@@ -47,7 +52,9 @@ from backend.utils.logging_utils import init_logging, print_divider, print_heade
 # Forecast vintage -- the date the run is produced (None -> date.today()).
 RUN_DATE: date | None = None
 # How many forward delivery days to publish (None -> the whole latest vintage).
-HORIZON_DAYS: int | None = 7
+# 14 = the full Meteologica DA-price horizon; capped by the vintage's own
+# coverage on shorter days.
+HORIZON_DAYS: int | None = 14
 HUB: str = "WESTERN HUB"
 CACHE_DIR: Path | None = None
 LOG_DIR: Path = _REPO_ROOT / "backend" / "modelling" / "logs"
@@ -109,7 +116,7 @@ def run(
         if callable(reconfigure):
             reconfigure(encoding="utf-8", errors="replace")
 
-    pl = init_logging(name="baseline_meteo_da_price_next_7", log_dir=LOG_DIR)
+    pl = init_logging(name="baseline_meteo_da_price_next_14", log_dir=LOG_DIR)
     try:
         resolved_run_date = run_date if run_date is not None else date.today()
         run_id = str(uuid.uuid4())
